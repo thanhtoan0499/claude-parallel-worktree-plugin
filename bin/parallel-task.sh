@@ -18,23 +18,21 @@
 # which worktree owns which number, and give one place to list/stop/remove them.
 #
 # Usage:
-#   parallel-task.sh start <task-name> <native|docker> [base-ref]
-#   parallel-task.sh list
-#   parallel-task.sh stop  <task-name>
-#   parallel-task.sh rm    <task-name> [--force]
+#   parallel-task.sh start    <task-name> <native|docker> [base-ref] [--ticket <id> ...]
+#   parallel-task.sh dispatch <task-name> <prompt> [--model <model>] [--effort low|medium|high|xhigh|max]
+#   parallel-task.sh list     [--json]
+#   parallel-task.sh stop     <task-name>
+#   parallel-task.sh rm       <task-name> [--force]
 set -euo pipefail
 
 usage() {
-  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKTREES_DIR="$REPO_ROOT/.claude/worktrees"
 REGISTRY="$WORKTREES_DIR/.parallel-registry.json"
-
-[[ $# -ge 1 ]] || usage
-COMMAND="$1"; shift || true
 
 mkdir -p "$WORKTREES_DIR"
 [[ -f "$REGISTRY" ]] || echo '{}' > "$REGISTRY"
@@ -55,6 +53,14 @@ reg_del_entry() {
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/parallel-task-registry.XXXXXX.json")"
   jq --arg k "$1" 'del(.[$k])' "$REGISTRY" > "$tmp"
+  mv "$tmp" "$REGISTRY"
+}
+
+reg_merge_entry() {
+  # reg_merge_entry <task-name> <json-object-to-merge-in>
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/parallel-task-registry.XXXXXX.json")"
+  jq --arg k "$1" --argjson v "$2" '.[$k] += $v' "$REGISTRY" > "$tmp"
   mv "$tmp" "$REGISTRY"
 }
 
@@ -110,9 +116,60 @@ copy_worktreeinclude() {
 
 # --- commands -----------------------------------------------------------------
 
-cmd_start() {
-  [[ $# -ge 2 ]] || { echo "error: start needs <task-name> <native|docker> [base-ref]" >&2; usage; }
+# parse_start_args "$@" -> prints "task<TAB>mode<TAB>base_ref<TAB>ado_ids_json" on success.
+# Pure parsing only — no filesystem/network access — so it's testable on its own.
+parse_start_args() {
+  local -a ticket_ids=()
+  local -a positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ticket)
+        [[ $# -ge 2 ]] || { echo "error: --ticket requires a value" >&2; return 1; }
+        ticket_ids+=("$2"); shift 2 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  set -- "${positional[@]}"
+  [[ $# -ge 2 ]] || { echo "error: start needs <task-name> <native|docker> [base-ref]" >&2; return 1; }
   local task="$1" mode="$2" base_ref="${3:-origin/main}"
+  local ado_ids_json
+  ado_ids_json="$(jq -cn --args '$ARGS.positional' -- "${ticket_ids[@]}")"
+  printf '%s\t%s\t%s\t%s\n' "$task" "$mode" "$base_ref" "$ado_ids_json"
+}
+
+# parse_dispatch_args "$@" -> sets DISPATCH_MODEL, DISPATCH_EFFORT, DISPATCH_PROMPT; returns 1 on error.
+# Globals rather than a printed tab-separated line: a prompt is multi-line, and a newline inside a
+# tab-delimited return would break the caller's read.
+parse_dispatch_args() {
+  DISPATCH_MODEL=""; DISPATCH_EFFORT=""; DISPATCH_PROMPT=""
+  local -a positional=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --model)
+        [[ $# -ge 2 ]] || { echo "error: --model requires a value" >&2; return 1; }
+        DISPATCH_MODEL="$2"; shift 2 ;;
+      --effort)
+        [[ $# -ge 2 ]] || { echo "error: --effort requires a value" >&2; return 1; }
+        case "$2" in
+          low|medium|high|xhigh|max) DISPATCH_EFFORT="$2" ;;
+          *) echo "error: --effort must be low|medium|high|xhigh|max, got '$2'" >&2; return 1 ;;
+        esac
+        shift 2 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  [[ ${#positional[@]} -ge 1 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; return 1; }
+  if [[ ${#positional[@]} -gt 1 ]]; then
+    echo "error: the prompt must be ONE quoted argument, got ${#positional[@]} — an unquoted prompt lets its own words be eaten as flags" >&2
+    return 1
+  fi
+  DISPATCH_PROMPT="${positional[*]}"
+}
+
+cmd_start() {
+  local parsed task mode base_ref ado_ids_json
+  parsed="$(parse_start_args "$@")" || usage
+  IFS=$'\t' read -r task mode base_ref ado_ids_json <<< "$parsed"
 
   [[ "$task" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "error: task-name must be kebab-case (got: '$task')" >&2; exit 1; }
   [[ "$mode" == "native" || "$mode" == "docker" ]] || { echo "error: mode must be 'native' or 'docker' (got: '$mode')" >&2; exit 1; }
@@ -175,8 +232,8 @@ cmd_start() {
 
   reg_set_entry "$task" "$(jq -n \
     --arg branch "$branch" --arg path "$wt_path" --arg mode "$mode" \
-    --argjson num "$num" --argjson ports "$ports_json" \
-    '{branch:$branch, path:$path, mode:$mode, num:$num, ports:$ports}')"
+    --argjson num "$num" --argjson ports "$ports_json" --argjson ado_ids "$ado_ids_json" \
+    '{branch:$branch, path:$path, mode:$mode, num:$num, ports:$ports, ado_ids:$ado_ids}')"
   trap - ERR
 
   echo ">> $task ready: branch $branch  mode $mode  worktree $wt_path"
@@ -187,6 +244,10 @@ cmd_start() {
 }
 
 cmd_list() {
+  if [[ "${1:-}" == "--json" ]]; then
+    list_json
+    return
+  fi
   local tasks
   tasks="$(reg_get 'keys[]')"
   [[ -z "$tasks" ]] && { echo "(no parallel copies registered)"; return 0; }
@@ -208,10 +269,54 @@ cmd_list() {
   done <<< "$tasks"
 }
 
+list_json() {
+  local tasks
+  tasks="$(reg_get 'keys[]')"
+  if [[ -z "$tasks" ]]; then
+    echo "[]"
+    return 0
+  fi
+  local agents_json
+  agents_json="$(claude agents --json --all 2>/dev/null)" || true
+  [[ -n "$agents_json" ]] || agents_json="[]"
+  {
+    while IFS= read -r task; do
+      local entry mode num gw dev_status session_id agent_obj
+      entry="$(reg_get --arg k "$task" '.[$k]')"
+      mode="$(jq -r '.mode' <<<"$entry")"
+      num="$(jq -r '.num' <<<"$entry")"
+      gw="$(jq -r '.ports.gateway' <<<"$entry")"
+      if [[ "$mode" == "docker" ]]; then
+        docker_slot_busy "$num" && dev_status="running" || dev_status="stopped"
+      else
+        port_busy "$gw" && dev_status="running" || dev_status="stopped"
+      fi
+      session_id="$(jq -r '.session_id // empty' <<<"$entry")"
+      agent_obj="{}"
+      if [[ -n "$session_id" ]]; then
+        agent_obj="$(jq -c --arg sid "$session_id" '([.[] | select(.sessionId==$sid)] | last) // {}' <<<"$agents_json")"
+        [[ -n "$agent_obj" ]] || agent_obj="{}"
+      fi
+      jq -c --arg task "$task" --arg dev_status "$dev_status" --argjson agent "$agent_obj" \
+        '. + {task: $task, dev_status: $dev_status,
+              agent_status: ($agent.status // null),
+              agent_state: ($agent.state // null)}' \
+        <<<"$entry"
+    done <<< "$tasks"
+  } | jq -s '.'
+}
+
 cmd_stop() {
   [[ $# -ge 1 ]] || { echo "error: stop needs <task-name>" >&2; usage; }
   local task="$1"
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task'" >&2; exit 1; }
+
+  local short_id
+  short_id="$(reg_get --arg k "$task" '.[$k].short_id // empty')"
+  if [[ -n "$short_id" ]]; then
+    claude stop "$short_id" || true
+  fi
+
   local mode num path
   mode="$(reg_get --arg k "$task" '.[$k].mode')"
   num="$(reg_get --arg k "$task" '.[$k].num')"
@@ -248,13 +353,66 @@ cmd_rm() {
   echo "   git -C '$REPO_ROOT' branch -d <branch>"
 }
 
-case "$COMMAND" in
-  start) cmd_start "$@" ;;
-  list)  cmd_list "$@" ;;
-  stop)  cmd_stop "$@" ;;
-  rm)    cmd_rm "$@" ;;
-  *)
-    echo "error: unknown command '$COMMAND'" >&2
-    usage
-    ;;
-esac
+cmd_dispatch() {
+  [[ $# -ge 2 ]] || { echo "error: dispatch needs <task-name> <prompt>" >&2; usage; }
+  local task="$1"; shift
+  parse_dispatch_args "$@" || usage
+  local prompt="$DISPATCH_PROMPT"
+  [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task' (see: $0 list)" >&2; exit 1; }
+  local wt_path
+  wt_path="$(reg_get --arg k "$task" '.[$k].path')"
+
+  local -a launch=(claude --bg -n "$task")
+  if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(--model "$DISPATCH_MODEL"); fi
+  if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(--effort "$DISPATCH_EFFORT"); fi
+  launch+=(--)
+  launch+=("$prompt")
+
+  local launch_out
+  if ! launch_out="$( cd "$wt_path" && "${launch[@]}" 2>&1 )"; then
+    echo "error: claude --bg failed to launch for '$task':" >&2
+    echo "$launch_out" >&2
+    exit 1
+  fi
+
+  local short_id
+  if [[ "$launch_out" =~ backgrounded[[:space:]]·[[:space:]]([a-f0-9]+)[[:space:]]· ]]; then
+    short_id="${BASH_REMATCH[1]}"
+  else
+    echo "error: could not find a 'backgrounded · <id> · ...' line in claude --bg output for '$task':" >&2
+    echo "$launch_out" >&2
+    exit 1
+  fi
+
+  local session_id
+  session_id="$(claude agents --json --all \
+    | jq -r --arg n "$task" '[.[] | select(.name==$n)] | sort_by(.startedAt) | last | .sessionId // empty')" || true
+  if [[ -z "$session_id" ]]; then
+    echo "error: dispatched '$task' (short id $short_id) but could not resolve its session_id via 'claude agents --json'" >&2
+    exit 1
+  fi
+
+  reg_merge_entry "$task" "$(jq -n \
+    --arg sid "$short_id" --arg fid "$session_id" \
+    --arg m "$DISPATCH_MODEL" --arg e "$DISPATCH_EFFORT" \
+    '{short_id:$sid, session_id:$fid}
+       + (if $m == "" then {} else {model:$m} end)
+       + (if $e == "" then {} else {effort:$e} end)')"
+  echo ">> $task dispatched: short id $short_id  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  [[ $# -ge 1 ]] || usage
+  COMMAND="$1"; shift || true
+  case "$COMMAND" in
+    start)    cmd_start "$@" ;;
+    dispatch) cmd_dispatch "$@" ;;
+    list)     cmd_list "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    rm)       cmd_rm "$@" ;;
+    *)
+      echo "error: unknown command '$COMMAND'" >&2
+      usage
+      ;;
+  esac
+fi

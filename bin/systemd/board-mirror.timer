@@ -1,0 +1,18 @@
+[Unit]
+Description=Run board-mirror.service every 5 minutes, off the round marks
+
+[Timer]
+# :02, :07, :12 ... :57 — every 5 minutes, offset by +2 so this doesn't land on the same instant
+# as every other job that asked for "every 5 minutes" and got :00/:05/:10/... See board-mirror.md
+# Scheduling section, and the old 15-minute cron's :07/:22/:37/:52 for the same reasoning.
+OnCalendar=*-*-* *:2/5:00
+# If the machine was asleep/off at a fire time, don't run a catch-up burst on wake — a stale
+# board is already visibly stale on the page, and the very next fire is at most 5 minutes away.
+Persistent=false
+# The unit this triggers is a plain (non-templated) `oneshot` service, so systemd can only ever
+# have one instance of it active: a fire that lands while the previous run is still going is
+# coalesced into a no-op rather than starting a second `claude -p` against the same artifact.
+# That is the overlap guard — see bin/systemd/board-mirror.service.
+
+[Install]
+WantedBy=timers.target

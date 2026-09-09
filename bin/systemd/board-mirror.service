@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh the manager board artifact (see bin/board-mirror.md)
+# Deliberately no `After=network-online.target`: this is a --user unit, and gating it on a
+# system target it cannot depend on across a `loginctl enable-linger` boot would just delay
+# every run by however long that target takes. `claude -p` failing on a cold network is already
+# handled — it fails loudly (see run-board-mirror.sh) rather than silently.
+
+[Service]
+Type=oneshot
+# Real values live outside the repo — see board-mirror.env.example. This path is what
+# bin/systemd/README.md tells the operator to create.
+EnvironmentFile=%h/.config/board-mirror/env
+# A symlink to the checked-out run-board-mirror.sh, not a copy — see README.md step 2. Keeping
+# this path fixed under ~/.config means the unit file never hardcodes where this repo happens to
+# be checked out, and survives the repo moving as long as the symlink is redone.
+ExecStart=%h/.config/board-mirror/run-board-mirror.sh
+# Comfortably under the 5-minute timer cadence: a hung run must not block every later fire.
+TimeoutStartSec=240

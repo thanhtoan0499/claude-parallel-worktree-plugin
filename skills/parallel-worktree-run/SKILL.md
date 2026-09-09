@@ -1,6 +1,6 @@
 ---
 name: parallel-worktree-run
-description: Spin up a fully running, independent copy of the current repo (own git worktree + branch + own docker/native dev stack + own ports) from the ROOT Claude Code session, and dispatch a background subagent to implement a task inside it — all without the root session ever leaving the repo root. Trigger when the user wants to work on a new task WHILE another task is already in flight, explicitly asks to run things "song song" / "chạy song song" / "clone thêm bản" / in parallel, or wants multiple live preview URLs up at once for different branches. Covers provisioning via `parallel-task.sh`, dispatching the implementing subagent, and listing/stopping/removing copies. For a task that only needs isolated CODE (no separate running dev server), a plain `git worktree` is enough — this skill is for when a live, independently-addressable dev stack is also needed.
+description: Spin up a fully running, independent copy of the current repo (own git worktree + branch + own docker/native dev stack + own ports) from the ROOT Claude Code session, and dispatch a background session to implement a task inside it — all without the root session ever leaving the repo root. Trigger when the user wants to work on a new task WHILE another task is already in flight, explicitly asks to run things "song song" / "chạy song song" / "clone thêm bản" / in parallel, or wants multiple live preview URLs up at once for different branches. Covers provisioning via `parallel-task.sh`, dispatching the implementing session, and listing/stopping/removing copies. For a task that only needs isolated CODE (no separate running dev server), a plain `git worktree` is enough — this skill is for when a live, independently-addressable dev stack is also needed.
 ---
 
 # Parallel worktree + dev-stack, controlled from one root session
@@ -10,7 +10,7 @@ branch, in its own worktree, with its own running dev stack on its own ports —
 user only ever talks to **one** Claude Code session, parked at the repo root.
 
 The root session's own `pwd` must never change for this. It provisions copies and dispatches
-background subagents to work inside them; it does not `EnterWorktree` itself.
+background sessions to work inside them; it does not `EnterWorktree` itself.
 
 ## Prerequisites — repo layout this plugin assumes
 
@@ -32,7 +32,7 @@ conventions for `bin/dev-stack.sh` / `bin/dev-native.sh` to work unmodified:
   If a paired "worktree-new-feature"-style skill exists in this project's own `.claude/skills/`,
   prefer it for that case instead of this one.
 - **This skill**: isolate code AND run a separate live dev stack (own ports, own URLs) AND
-  dispatch the implementation to a background subagent, so multiple tasks can be live and
+  dispatch the implementation to a background session, so multiple tasks can be live and
   being worked simultaneously.
 
 If you're not sure a separate running stack is actually needed, ask — don't create
@@ -69,36 +69,44 @@ Port scheme, so the user knows what to expect:
 - `native` mode: task *N* → gateway `8500+N`, frontend `5500+N` (a different, smaller offset;
   shared Postgres/Azurite across all native tasks)
 
-## Step 3 — dispatch the implementing subagent
+## Step 3 — dispatch the implementing session
 
-Spawn a **background** `Agent` call (default subagent type is fine — don't pass
-`isolation: "worktree"`, the worktree already exists from Step 2). The prompt must:
+Build the task prompt (do NOT skip any of these — this becomes the literal `<prompt>` argument
+to `dispatch`):
 
-1. Tell it the worktree's **absolute path** and instruct it to call
-   `EnterWorktree(path="<abs path>")` as its very first action — this moves only *that
-   subagent's* own cwd/statusline/hooks, never the root session's. Then verify with `pwd` and
-   `git branch --show-current` before touching any file (same split-brain trap
-   `worktree-new-feature` warns about, just via `path` instead of `name` since the worktree
-   already exists). Don't just describe the path in prose and hope — the prompt must literally
-   instruct the `EnterWorktree` tool call; a subagent that only reads the path from prose and
-   never calls it can drift back to the root session's cwd.
-2. Give it the actual task/requirements verbatim.
-3. Give it the dev URLs from Step 2, so it can verify its work against a live server instead
-   of only static analysis.
-4. Point it at the repo's normal gates: any rules under `.claude/rules/*` or `CLAUDE.md`,
-   commit message format, and any post-task note-taking convention the repo has.
-5. **Forbid `--frontend-only` as a workaround.** If this slot's `dev-stack.sh N up -d` (or a
-   restart of it) fails, the subagent must diagnose and retry the full stack — never fall back
-   to `dev-stack.sh N up --frontend-only`. That flag repoints the frontend at the
-   *shared* slot-0 gateway, silently breaking the own-DB/own-backend isolation this skill
-   exists to guarantee (a real regression: a subagent hit a half-created stack from a prior
-   failed run and "fixed" it by switching to `--frontend-only`, so the task ran against the
-   wrong tenant's DB until caught). `--frontend-only` belongs to `worktree-new-feature` only.
-6. Ask it to end with a summary: files changed, tests run + result, URLs — this is what gets
-   relayed to the user when the task-notification arrives.
+1. The actual task/requirements verbatim.
+2. The dev URLs from Step 2, so it can verify its work against a live server instead of only
+   static analysis.
+3. The repo's normal gates: any rules under `.claude/rules/*` or `CLAUDE.md`, commit message
+   format, and any post-task note-taking convention the repo has.
+4. **Forbid `--frontend-only` as a workaround.** If this slot's `dev-stack.sh N up -d` (or a
+   restart of it) fails, it must diagnose and retry the full stack — never fall back to
+   `dev-stack.sh N up --frontend-only`. That flag repoints the frontend at the *shared* slot-0
+   gateway, silently breaking the own-DB/own-backend isolation this skill exists to guarantee (a
+   real regression: a dispatched session hit a half-created stack from a prior failed run and
+   "fixed" it by switching to `--frontend-only`, so the task ran against the wrong tenant's DB
+   until caught). `--frontend-only` belongs to `worktree-new-feature` only.
+5. Ask it to end with a summary: files changed, tests run + result, URLs.
 
-Launch one `Agent` call per task-name. To start several at once, send multiple `Agent` calls
-in a single message so they run concurrently.
+Then dispatch:
+
+```bash
+parallel-task.sh dispatch <task-name> "<prompt>" [--model <model>] [--effort low|medium|high|xhigh|max]
+```
+
+This launches an independent, addressable top-level Claude Code session in that worktree
+(`claude --bg`) and records its id in the registry — it is NOT a subagent of this root session.
+There is no `EnterWorktree` step to instruct here: the dispatched session's process starts with
+its cwd already inside the worktree (`dispatch` runs `claude --bg` from there directly), so the
+split-brain trap `worktree-new-feature` warns about for subagents (drifting back to the root
+session's cwd) doesn't apply to this path.
+
+`dispatch` returns immediately once the session is backgrounded — no need to batch multiple calls
+in one message the way background `Agent` calls did; issue them one after another.
+
+Because the dispatched session is a real, addressable Claude Code session (not a one-shot
+subagent), it can also be talked to mid-task — `claude attach <short-id>` opens it in the current
+terminal, or another session can message it once it appears in that session's peer list.
 
 ## Step 4 — repeat for more tasks
 
@@ -118,8 +126,45 @@ parallel-task.sh rm    <task-name> --force  # also discard uncommitted changes
 `rm` never deletes the branch — after the PR merges, clean up with
 `git branch -d feature/<task-name>` same as `worktree-new-feature`'s convention.
 
-When a dispatched subagent's task-notification arrives, relay its summary to the user and ask
-whether to keep that copy running (for review / follow-up) or tear it down with `rm`.
+Check on a dispatched session's progress via `parallel-task.sh list --json` (or the dashboard, if running)
+for its live status, or `claude attach <short-id>` to check in directly. When it reports done, relay
+its summary to the user and ask whether to keep that copy running (for review / follow-up) or tear it
+down with `rm`.
+
+## Step 6 — escalate instead of stalling
+
+When a dispatched session hits something it cannot decide alone, it appends one record to the
+escalation queue rather than stopping and waiting for you:
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0, "<plugin bin dir>")
+from escalations import QUEUE_PATH, append, new_record
+append(QUEUE_PATH, new_record(
+    session_id="<this session's id>",
+    kind="diff_review",              # or red_tests / looping / pick_implementation / scope_question
+    question="Merge the adapter change?",
+    options=["Approve", "Reject"],
+    evidence={"tests": "green", "branch": "feature/x", "deps_added": [],
+              "migration": False, "changed_files": ["bin/dashboard.py"]},
+))
+PY
+```
+
+`manager_daemon.py` picks it up within seconds and puts it to the persistent Engineering Manager
+session — one long-lived session for the whole team, not a fresh model per escalation, so it
+remembers what it already decided and what else is in flight. Mechanical calls are settled there
+and delivered straight back into the worker; anything irreversible, security-shaped, or genuinely
+ambiguous waits for you in the dashboard's decision panel. Every automatic decision
+also shows up as a tinted line in the manager's chat, so nothing is decided on your behalf
+invisibly. The manager's charter — what it decides itself vs. escalates, how it dispatches and
+sizes work — is `skills/engineering-manager/SKILL.md`.
+
+Start the daemon alongside the dashboard:
+
+```bash
+manager_daemon.py       # watches ~/.claude/hermes/escalations.jsonl
+```
 
 ## Troubleshooting
 

@@ -1,0 +1,1317 @@
+<title>Bảng Điều Phối</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* ============ Tokens ============
+     Light is the base palette; dark is a deliberate second palette (not an inversion),
+     applied through the three-state pattern the artifact host requires: an un-stamped root
+     (prefers-color-scheme only), an explicit dark stamp, and an explicit light stamp that
+     must win even on a dark OS. Every color used anywhere below is declared here first. */
+  :root {
+    --bg:            #EAEFF2;
+    --surface:       #FFFFFF;
+    --surface-2:     #F3F6F8;
+    --surface-hover: #E7EDF0;
+    --border:        #D6DFE4;
+    --border-soft:   #E3E9EC;
+    --ink:           #10181F;
+    --ink-soft:      #46545F;
+    --faint:         #86929B;
+
+    --accent:        #0B7C86;
+    --accent-strong: #075961;
+    --accent-ink:    #FFFFFF;
+    --accent-soft:   #DEF1F1;
+
+    --good:      #1C8A4C;
+    --good-ink:  #0E5A31;
+    --good-soft: #DFF3E7;
+    --warn:      #A6660A;
+    --warn-ink:  #7A4B06;
+    --warn-soft: #FBEEDA;
+    --bad:       #B23A2E;
+    --bad-ink:   #832A21;
+    --bad-soft:  #FBE4E1;
+
+    --shadow: 0 1px 2px rgba(16,24,32,.07), 0 4px 14px rgba(16,24,32,.05);
+    --radius-s: 6px;
+    --radius-m: 10px;
+
+    --font-ui:   "Be Vietnam Pro", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
+    --fs-xs: 11px; --fs-sm: 12.5px; --fs-base: 14px; --fs-md: 15.5px; --fs-lg: 18px; --fs-xl: 23px;
+
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:            #0E151B;
+      --surface:       #16202A;
+      --surface-2:     #1C2833;
+      --surface-hover: #223040;
+      --border:        #2B3947;
+      --border-soft:   #22303C;
+      --ink:           #E6EDF1;
+      --ink-soft:      #A8B7C1;
+      --faint:         #71828C;
+
+      --accent:        #4FD1D9;
+      --accent-strong: #7EE0E6;
+      --accent-ink:    #06272A;
+      --accent-soft:   #163338;
+
+      --good:      #4ECB84;
+      --good-ink:  #9CEBB9;
+      --good-soft: #17301F;
+      --warn:      #F0A93C;
+      --warn-ink:  #FBD189;
+      --warn-soft: #3A2A0D;
+      --bad:       #F0776A;
+      --bad-ink:   #FBB4AA;
+      --bad-soft:  #3B1E1A;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.45), 0 6px 20px rgba(0,0,0,.35);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:            #0E151B;
+    --surface:       #16202A;
+    --surface-2:     #1C2833;
+    --surface-hover: #223040;
+    --border:        #2B3947;
+    --border-soft:   #22303C;
+    --ink:           #E6EDF1;
+    --ink-soft:      #A8B7C1;
+    --faint:         #71828C;
+
+    --accent:        #4FD1D9;
+    --accent-strong: #7EE0E6;
+    --accent-ink:    #06272A;
+    --accent-soft:   #163338;
+
+    --good:      #4ECB84;
+    --good-ink:  #9CEBB9;
+    --good-soft: #17301F;
+    --warn:      #F0A93C;
+    --warn-ink:  #FBD189;
+    --warn-soft: #3A2A0D;
+    --bad:       #F0776A;
+    --bad-ink:   #FBB4AA;
+    --bad-soft:  #3B1E1A;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.45), 0 6px 20px rgba(0,0,0,.35);
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  /* ============ Base ============ */
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    font-size: var(--fs-base);
+    line-height: 1.5;
+  }
+  h1, h2, h3 { font-family: var(--font-ui); text-wrap: balance; margin: 0; }
+  a { color: var(--accent-strong); }
+  a:hover { color: var(--accent); }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+  button, select { font: inherit; color: inherit; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+
+  /* ============ Layout ============ */
+  .app { max-width: 1280px; margin: 0 auto; padding: 20px 22px 56px; display: flex; flex-direction: column; gap: 20px; }
+
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg);
+    padding: 14px 0 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .topbar-row1 { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: var(--radius-s);
+    background: var(--accent); color: var(--accent-ink);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono); font-weight: 600; font-size: 15px;
+    flex: none;
+  }
+  .brand h1 { font-size: var(--fs-xl); font-weight: 800; letter-spacing: -.01em; }
+  .brand .subtitle { margin: 2px 0 0; color: var(--faint); font-size: var(--fs-sm); }
+
+  .topbar-row2 { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .summary-strip, .freshness-strip, .refresh-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .refresh-btn {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .refresh-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .refresh-btn:disabled { cursor: default; opacity: .6; }
+  .refresh-age { font-size: var(--fs-sm); color: var(--ink-soft); }
+  .refresh-age-stale {
+    color: var(--bad-ink); background: var(--bad-soft); font-weight: 700;
+    padding: 2px 8px; border-radius: var(--radius-s); border: 1px solid var(--bad-ink);
+  }
+  .refresh-note { font-size: var(--fs-xs); color: var(--faint); }
+  .freshness-strip { margin-left: auto; }
+
+  .conn { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); color: var(--ink-soft); flex: none; }
+  .conn-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+  .conn-dot.conn-live { background: var(--good); }
+  .conn-dot.conn-down { background: var(--bad); }
+
+  .board { display: flex; flex-direction: column; gap: 26px; }
+  .board-section { display: flex; flex-direction: column; gap: 12px; }
+  .section-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .section-head h2 { font-size: var(--fs-lg); font-weight: 700; }
+  .section-head .hint { color: var(--faint); font-size: var(--fs-sm); }
+  .section-count {
+    font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600;
+    color: var(--ink-soft); background: var(--surface-2); border: 1px solid var(--border-soft);
+    border-radius: 999px; padding: 1px 8px;
+  }
+
+  /* ============ Pills / chips ============ */
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 9px; border-radius: 999px;
+    font-size: var(--fs-xs); font-weight: 700; letter-spacing: .02em;
+    white-space: nowrap; line-height: 1.7;
+  }
+  .pill-bad     { background: var(--bad-soft);  color: var(--bad-ink); }
+  .pill-warn    { background: var(--warn-soft); color: var(--warn-ink); }
+  .pill-good    { background: var(--good-soft); color: var(--good-ink); }
+  .pill-accent  { background: var(--accent-soft); color: var(--accent-strong); }
+  .pill-neutral { background: var(--surface-2); color: var(--ink-soft); border: 1px solid var(--border-soft); font-weight: 600; }
+
+  .chip {
+    font-family: var(--font-mono); font-size: var(--fs-xs);
+    background: var(--surface-2); border: 1px solid var(--border-soft);
+    color: var(--ink-soft); border-radius: var(--radius-s); padding: 1px 6px;
+    text-decoration: none;
+  }
+  a.chip:hover { border-color: var(--accent); color: var(--accent-strong); }
+
+  .drift {
+    color: var(--warn-ink); background: var(--warn-soft); border-radius: 4px;
+    padding: 0 4px; font-size: var(--fs-xs); cursor: help; margin-left: 2px;
+  }
+
+  /* ============ States: placeholder / empty / error ============ */
+  .state-note {
+    padding: 18px 16px; border-radius: var(--radius-m); border: 1px dashed var(--border);
+    color: var(--faint); font-size: var(--fs-sm);
+  }
+  .state-note.is-loading { font-style: italic; }
+  .state-note.is-good  { border-style: solid; border-color: var(--good-soft); background: var(--good-soft); color: var(--good-ink); font-weight: 600; }
+  .state-note.is-error { border-style: solid; border-color: var(--bad-soft); background: var(--bad-soft); color: var(--bad-ink); font-weight: 600; }
+
+  .stale-banner {
+    margin-bottom: 12px; padding: 12px 16px; border-radius: var(--radius-m);
+    border: 1px solid var(--bad-ink); background: var(--bad-soft); color: var(--bad-ink);
+    font-weight: 600; font-size: var(--fs-sm);
+  }
+
+  .unavailable {
+    margin-top: 8px; padding: 32px 20px; text-align: center;
+    border: 1px solid var(--bad-soft); background: var(--bad-soft); color: var(--bad-ink);
+    border-radius: var(--radius-m); font-weight: 600; font-size: var(--fs-md);
+  }
+  .unavailable::before { content: "⚠"; display: block; font-size: 22px; margin-bottom: 8px; }
+
+  /* ============ Escalations ============ */
+  .esc-list { display: flex; flex-direction: column; gap: 10px; }
+  .esc-card {
+    background: var(--surface); border: 1px solid var(--border-soft); border-left: 4px solid var(--border);
+    border-radius: var(--radius-m); padding: 12px 14px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .esc-card.sev-P0 { border-left-color: var(--bad); background: var(--bad-soft); }
+  .esc-card.sev-P1 { border-left-color: var(--warn); background: var(--warn-soft); }
+  .esc-card.sev-P2 { border-left-color: var(--accent); background: var(--surface); }
+
+  .esc-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .esc-wait { margin-left: auto; font-size: var(--fs-sm); color: var(--ink-soft); }
+  .esc-question { font-size: var(--fs-md); font-weight: 600; }
+  .esc-session { font-size: var(--fs-sm); color: var(--faint); }
+  .esc-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+  .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
+  /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
+     question+options above it by a thin rule so the card stays scannable at a glance. */
+  .esc-evidence { display: flex; flex-direction: column; gap: 3px; padding-top: 5px; border-top: 1px dashed var(--border-soft); }
+
+  /* ============ Sessions ============ */
+  .session-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .session-tile {
+    background: var(--surface); border: 1px solid var(--border-soft); border-left: 3px solid var(--border);
+    border-radius: var(--radius-m); padding: 11px 13px; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .session-tile.state-running { border-left-color: var(--good); }
+  .session-tile.state-idle { border-left-color: var(--border); opacity: .85; }
+  .session-tile.state-waiting {
+    border-left-color: var(--warn); border-left-width: 5px;
+    background: var(--warn-soft);
+    box-shadow: var(--shadow), 0 0 0 1px var(--warn-soft);
+  }
+  .session-tile.state-done { border-left-color: var(--border); opacity: .65; }
+  .session-tile.state-unknown { border-left-color: var(--bad); }
+
+  .state-badge { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+  .state-badge.b-waiting { color: var(--warn-ink); }
+  .state-badge.b-running { color: var(--good-ink); }
+  .state-badge.b-idle,.state-badge.b-done { color: var(--faint); }
+  .state-badge.b-unknown { color: var(--bad-ink); }
+  .state-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .state-dot.dot-waiting { animation: pulse-warn 1.5s ease-in-out infinite; }
+  @keyframes pulse-warn { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(.7); } }
+
+  .session-task { font-family: var(--font-mono); font-weight: 600; font-size: var(--fs-base); word-break: break-word; }
+  .session-row { font-size: var(--fs-sm); color: var(--ink-soft); display: flex; gap: 6px; }
+  .session-row .k { color: var(--faint); flex: none; }
+  .session-row .v { font-family: var(--font-mono); word-break: break-word; }
+  /* A worker's claim disagreeing with its observed session state. Loud on purpose: it is the one
+     row on the tile saying the two sources of truth do not match, and it must not read as just
+     another field. */
+  .session-row.claim-conflict .v { font-family: inherit; color: var(--bad); font-weight: 600; }
+  .session-row.claim-note .v { font-family: inherit; }
+  .session-refs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+
+  /* ============ Tickets ============ */
+  .ticket-filters { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: var(--fs-sm); }
+  .ticket-filters label { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+  .ticket-filters select {
+    background: var(--surface); border: 1px solid var(--border); color: var(--ink);
+    border-radius: var(--radius-s); padding: 4px 8px;
+  }
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-m); }
+  table.tickets { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); background: var(--surface); }
+  table.tickets th, table.tickets td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  table.tickets th { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--faint); font-weight: 700; background: var(--surface-2); }
+  table.tickets tbody tr:hover { background: var(--surface-hover); }
+  table.tickets td.num { font-family: var(--font-mono); white-space: nowrap; }
+  table.tickets td.title-cell { max-width: 420px; }
+
+  details.collapsed-group { margin-top: 2px; }
+  details.collapsed-group > summary {
+    cursor: pointer; font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 600;
+    padding: 6px 2px; list-style: none; display: flex; align-items: center; gap: 6px;
+  }
+  details.collapsed-group > summary::-webkit-details-marker { display: none; }
+  details.collapsed-group > summary::before { content: "▸"; font-size: 10px; color: var(--faint); }
+  details.collapsed-group[open] > summary::before { content: "▾"; }
+  details.collapsed-group > summary:hover { color: var(--ink); }
+
+  /* An assignment card IS its summary line until clicked, so that line carries pills and several
+     facts and has to be allowed to wrap on a narrow board. The card's own padding is the group's,
+     so the details block sits flush inside it. */
+  .esc-card.a-card { padding: 6px 14px; }
+  .a-card > details.collapsed-group { margin-top: 0; }
+  .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
+  .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
+  .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
+  .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
+
+  @media (max-width: 640px) {
+    .app { padding: 14px 14px 44px; }
+    .freshness-strip { margin-left: 0; }
+  }
+</style>
+
+<div class="app">
+  <div class="stale-banner" id="stale-banner" hidden></div>
+  <header class="topbar">
+    <div class="topbar-row1">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">◆</div>
+        <div>
+          <h1>Bảng Điều Phối</h1>
+          <p class="subtitle">Điều phối các phiên chạy song song</p>
+        </div>
+      </div>
+      <div class="conn" id="conn">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span id="conn-label">Đang kết nối…</span>
+      </div>
+    </div>
+    <div class="topbar-row2">
+      <div class="summary-strip" id="summary"></div>
+      <div class="freshness-strip" id="freshness"></div>
+      <div class="refresh-strip" id="refresh"></div>
+    </div>
+  </header>
+
+  <main class="board" id="board">
+    <section class="board-section"><p class="state-note is-loading">Đang kết nối tới dữ liệu bảng…</p></section>
+  </main>
+</div>
+
+<script>
+/* ---------- constants & vocab ---------- */
+
+// How stale is too stale. Every clock on meta/status — last_ado_sweep, last_session_scan,
+// written_at — is stamped by the SAME systemd-timer run, so they all age at one cadence and all
+// freeze together the moment that timer stops. One threshold, therefore, not one per source.
+//
+// The cadence is NOT a constant here. It arrives as meta/status.pump_period_s, which
+// board_state.py parses straight out of bin/systemd/board-mirror.timer's OnCalendar step — this
+// page runs in the artifact sandbox and has no filesystem to read a unit file from. That
+// indirection is the fix: this file used to say `ADO_CADENCE_S = 15 * 60` and kept saying it for
+// weeks after the timer was retuned to every 5 minutes, so a board could sit 14 minutes dead and
+// still render as perfectly fresh.
+//
+// Fallback for a meta doc written before pump_period_s existed. It is the last literal left, and
+// test_board_state.py reads the shipped unit file and fails if the two ever disagree.
+const PUMP_CADENCE_FALLBACK_S = 5 * 60;
+// Three cadences of silence. One slow or coalesced run is normal — the service is `oneshot` and
+// a fire landing on a still-running run is dropped by design — but two consecutive fires that
+// wrote nothing means the pump is not running, not merely late.
+const STALE_MULTIPLIER = 3;
+function staleThreshold() {
+  const p = view.meta && view.meta.pump_period_s;
+  const cadence = (typeof p === "number" && isFinite(p) && p > 0) ? p : PUMP_CADENCE_FALLBACK_S;
+  return cadence * STALE_MULTIPLIER;
+}
+
+const SEVERITY_RANK = { P0: 0, P1: 1, P2: 2 };
+const SEVERITY_LABEL = { P0: "khẩn cấp", P1: "quan trọng", P2: "mức thấp" };
+const SEVERITY_TONE = { P0: "pill-bad", P1: "pill-warn", P2: "pill-accent" };
+
+// "unknown" is not a state `claude agents --json` emits — it's what board_state.py's
+// normalize_state() returns for anything IT doesn't recognise (see board_state.py). It needs a
+// rank and a label like every other state: sessionTile()'s hasOwnProperty check below falls back
+// to "unknown" — never "idle" — for anything missing from this map, so a state nobody has
+// identified yet can never render as free.
+const STATE_RANK = { waiting: 0, unknown: 1, running: 2, idle: 3, done: 4 };
+const STATE_LABEL = { waiting: "Đang chờ duyệt", running: "Đang chạy", idle: "Rảnh", done: "Đã xong", unknown: "Không rõ trạng thái" };
+
+// The manager's own ledger vocabulary (assignments.py STATUSES). Priorities are NOT restated
+// here: an assignment's P0/P1/P2 means what an escalation's does, so it reuses SEVERITY_RANK /
+// SEVERITY_LABEL / SEVERITY_TONE above rather than growing a second scale that looks identical
+// and could quietly rank differently.
+const ASSIGNMENT_STATUS_LABEL = {
+  assigned: "đã giao", in_progress: "đang làm", blocked: "bị chặn",
+  done: "đã xong", cancelled: "đã huỷ",
+};
+const ASSIGNMENT_STATUS_TONE = {
+  assigned: "pill-neutral", in_progress: "pill-accent", blocked: "pill-bad",
+  done: "pill-good", cancelled: "pill-neutral",
+};
+const ASSIGNMENT_CLOSED_STATUSES = new Set(["done", "cancelled"]);
+// "unknown" is not a state the manager writes — it is what board_state.py returns for a step
+// state it does not recognise (see _STEP_STATES there). It needs a word here for exactly the
+// reason STATE_LABEL needs one: an unlabelled state renders as a bare English slug, or as
+// nothing at all, and "nothing at all" reads as "not started".
+const STEP_STATE_LABEL = { todo: "chưa làm", doing: "đang làm", done: "xong", unknown: "không rõ" };
+
+// The worker's own six-word vocabulary (board_state.CLAIM_PHASES), glossed. Everything else on a
+// session tile is observed fact; this is what the worker SAYS about itself, so it is always drawn
+// under its own "worker nói" label and never folded into the state badge. An unlisted phase can
+// never arrive — board_state refuses one — but the render falls back to the raw slug rather than
+// to a plausible word, same as STATE_LABEL.
+const PHASE_LABEL = {
+  exploring: "đang tìm hiểu", red_test: "đang viết test đỏ", implementing: "đang code",
+  verifying: "đang kiểm chứng", blocked: "đang kẹt", reporting: "đang viết báo cáo",
+};
+const PHASE_TONE = {
+  exploring: "pill-neutral", red_test: "pill-accent", implementing: "pill-accent",
+  verifying: "pill-accent", blocked: "pill-bad", reporting: "pill-good",
+};
+// Who can clear a block (board_state.BLOCKED_KINDS). "Bị chặn" alone is exactly the word this
+// replaces: a permission prompt, a product decision and a dependency are three different asks of
+// three different people.
+const BLOCKED_KIND_LABEL = {
+  permission: "chờ duyệt quyền", decision: "chờ quyết định",
+  dependency: "chờ việc khác", environment: "vướng môi trường",
+};
+
+// What the board WORKED OUT about a ticket, as opposed to the ADO state a person maintains
+// (board_state.TICKET_STATUSES, in that file's precedence order). Every word here answers one
+// question and only that question: whose move is it now. "Active" answers it for nobody, which is
+// how five tickets — one needing a merge click, one a reviewer, one a product decision, one a
+// push — all read identically.
+const DERIVED_STATUS_LABEL = {
+  waiting_decision: "chờ quyết định", checks_failing: "CI đang đỏ",
+  waiting_merge: "chờ bấm merge", waiting_review: "chờ review",
+  merged_not_closed: "đã merge, vé chưa đóng", waiting_push: "chờ đẩy code lên",
+  unclaimed: "chưa ai nhận",
+};
+// `waiting_merge` is green and not merely "another state": it is the only one of these whose next
+// move belongs to the person reading the board, so it has to be findable at a glance.
+const DERIVED_STATUS_TONE = {
+  waiting_decision: "pill-bad", checks_failing: "pill-bad",
+  waiting_merge: "pill-good", waiting_review: "pill-accent",
+  merged_not_closed: "pill-warn", waiting_push: "pill-warn",
+  unclaimed: "pill-neutral",
+};
+
+const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
+// Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
+// on what "done" means for a ticket.
+const TICKET_DONE_STATES = new Set(["Closed", "Removed", "Done"]);
+
+// The closed `kind` vocabulary (escalations.CANONICAL_KINDS), glossed for a fast scan. `kind` is
+// still shown as its raw slug — it is an identifier, not prose — this is only the hover text.
+const KIND_GLOSS = {
+  red_tests: "test đang đỏ",
+  looping: "lặp lại, không tiến triển",
+  pick_implementation: "cần chọn hướng triển khai",
+  scope_question: "câu hỏi về phạm vi",
+  irreversible: "thay đổi không thể hoàn tác",
+  push_or_pr: "chuẩn bị push / mở PR",
+  credentials: "vướng thông tin đăng nhập",
+  spec_ambiguity: "spec chưa rõ ràng",
+  no_convergence: "thử nhiều lần vẫn chưa xong",
+  cost_anomaly: "chi phí bất thường",
+  worktree_collision: "đụng worktree với phiên khác",
+  diff_review: "cần review diff",
+};
+
+/* ---------- tiny DOM builder ----------
+   textContent only, everywhere — question/kind_raw/branch/title are worker- or
+   externally-authored strings and must never be parsed as HTML. */
+function h(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === false) continue;
+      if (k === "class") node.className = v;
+      else if (k === "text") node.textContent = v;
+      else if (k.startsWith("on") && typeof v === "function") node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+  }
+  for (const child of children.flat(Infinity)) {
+    if (child == null || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+function pill(tone, label, title) {
+  return h("span", { class: "pill " + tone, title: title || null }, label);
+}
+
+/* ---------- time / formatting ---------- */
+function ageSeconds(unixSeconds) {
+  if (unixSeconds == null || !isFinite(unixSeconds)) return null;
+  return Math.max(0, Date.now() / 1000 - unixSeconds);
+}
+function durationText(s) {
+  if (s == null || !isFinite(s)) return null;
+  if (s < 60) return Math.floor(s) + " giây";
+  const m = s / 60;
+  if (m < 60) return Math.round(m) + " phút";
+  const hr = m / 60;
+  if (hr < 48) return Math.round(hr) + " giờ";
+  return Math.round(hr / 24) + " ngày";
+}
+function ageText(unixSeconds) {
+  return durationText(ageSeconds(unixSeconds));
+}
+// "1,2 tr" / "340 k". A token count printed raw is eight to nine digits — unreadable at a
+// glance, and unreadable is exactly what let a bogus total look plausible. Vietnamese decimal
+// comma, so "1,2" is one point two, not one thousand two hundred.
+function tokenText(n) {
+  if (typeof n !== "number" || !isFinite(n)) return null;
+  if (n >= 1e6) return (n / 1e6).toFixed(1).replace(".", ",") + " tr";
+  if (n >= 1000) return Math.round(n / 1000) + " k";
+  return String(Math.round(n));
+}
+function numId(id) {
+  const n = parseInt(String(id).replace(/\D/g, ""), 10);
+  return isFinite(n) ? n : Number.MAX_SAFE_INTEGER;
+}
+// Ticket/PR urls are server-assembled (ADO base + id, or a PR API response), not raw
+// worker-authored text — but the sibling dashboard treats every href sink this defensively
+// regardless of provenance, and one regex is cheap insurance against that changing later.
+function safeHref(url) {
+  return /^https?:\/\//i.test(url || "") ? url : null;
+}
+function ticketUrl(adoId) {
+  const t = view.tickets.find((x) => String(x.id) === String(adoId));
+  return t ? safeHref(t.url) : null;
+}
+function sessionLabel(sessionId) {
+  if (!sessionId) return "(không rõ phiên)";
+  const match = view.sessions.find((s) => s.session_id === sessionId);
+  return match ? match.task : String(sessionId).slice(0, 8);
+}
+
+/* ---------- shared state ---------- */
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
+// Extra bookkeeping alongside the required `view` shape above — which source has fired at least
+// once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+// Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
+// why the last one failed.
+view.refresh = { busy: false, error: null };
+
+const ticketFilters = { sprint: "", state: "" };
+// Applied once, the first time meta/status loads — after that the filter is the viewer's to
+// drive. Without this guard, every later meta/status update (the pump ticks every ~15 min) would
+// stomp a manual "tất cả" back to the sprint default.
+let sprintFilterDefaulted = false;
+
+/* ---------- small state-note builders ---------- */
+function loadingNote(text) { return h("p", { class: "state-note is-loading" }, text); }
+function goodNote(text) { return h("p", { class: "state-note is-good" }, text); }
+function errorNote(text) { return h("p", { class: "state-note is-error" }, text); }
+
+function sectionHead(title, hint, count) {
+  return h("div", { class: "section-head" },
+    h("h2", {}, title),
+    count != null ? h("span", { class: "section-count mono" }, String(count)) : null,
+    h("span", { class: "hint" }, hint));
+}
+
+function collapsedGroup(label, rows, openHint) {
+  return h("details", { class: "collapsed-group", open: openHint || null },
+    h("summary", {}, label),
+    ...rows);
+}
+
+/* ---------- escalations ---------- */
+function escalationCard(esc) {
+  const sev = esc.severity in SEVERITY_RANK ? esc.severity : "P2";
+  const drift = esc.kind !== esc.kind_raw;
+  const kindText = esc.kind == null ? "không rõ" : esc.kind;
+  const gloss = esc.kind ? KIND_GLOSS[esc.kind] : null;
+  const options = Array.isArray(esc.options) ? esc.options : [];
+  const evidence = esc.evidence && typeof esc.evidence === "object" ? esc.evidence : {};
+  const evidenceRows = Object.entries(evidence);
+  // `tier` (tier2/tier3, stamped when the record was queued) duplicates the severity pill
+  // whenever the two agree — escalation_severity() computes P0/P1 exactly when classify() would
+  // say tier3 and P2 exactly when it would say tier2, so an agreeing tier tells a manager nothing
+  // the pill doesn't. Show it only when it disagrees: that means the stored tier is stale
+  // relative to what today's classifier would say, the same kind of drift kind_raw flags above.
+  const impliedTier = sev === "P2" ? "tier2" : "tier3";
+  const tierDrift = esc.tier && esc.tier !== impliedTier ? esc.tier : null;
+
+  return h("div", { class: "esc-card sev-" + sev },
+    h("div", { class: "esc-top" },
+      pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
+      h("span", { class: "chip", title: gloss || null }, kindText),
+      drift ? h("span", {
+        class: "drift",
+        title: "worker viết: \"" + (esc.kind_raw == null ? "" : esc.kind_raw) + "\" — ngoài từ vựng chuẩn",
+      }, "⚠") : null,
+      h("span", { class: "esc-wait mono" }, "chờ " + (ageText(esc.ts) || "—")),
+    ),
+    h("div", { class: "esc-question" }, esc.question || "(không có nội dung câu hỏi)"),
+    h("div", { class: "esc-session" }, "phiên: " + sessionLabel(esc.session)),
+    // Read-only mirror (step 1 of the migration): these are the options the worker offered, not
+    // buttons — nothing here can deliver an answer to the worker yet, so a clickable-looking
+    // button would be a dead end. The line below says where answering actually still works.
+    options.length
+      ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
+      : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+    h("div", { class: "esc-session" }, "chỉ xem ở đây — trả lời tại dashboard cục bộ (cổng 4400)."),
+    // Supporting detail — why this reached a human, and what it touches — always last so the
+    // question and options above stay the first thing scanned.
+    esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
+    evidenceRows.length ? [
+      h("div", { class: "esc-session" }, "bằng chứng:"),
+      h("div", { class: "esc-evidence" }, evidenceRows.map(([k, v]) =>
+        h("div", { class: "session-row" }, h("span", { class: "k" }, k), h("span", { class: "v" }, v)))),
+    ] : null,
+    tierDrift ? h("div", { class: "esc-session" }, "tier đã lưu: " + tierDrift + " (khác mức hiện tại)") : null,
+  );
+}
+
+function resolvedEscalationRow(esc) {
+  return h("div", { class: "esc-session", style: "padding:4px 2px;" },
+    (esc.severity || "—") + " · " + (esc.kind || "không rõ") + " — " + (esc.question || "") +
+    " (" + (esc.status || "đã xử lý") + ")");
+}
+
+function renderEscalations() {
+  const section = h("section", { class: "board-section" });
+  const loaded = view.loaded.escalations;
+  const count = loaded ? view.escalations.filter((e) => !RESOLVED_STATUSES.has(e.status)).length : null;
+  section.append(sectionHead("Cần quyết định", "Việc đang chờ bạn trả lời — khẩn cấp nhất lên đầu.", count));
+
+  if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
+  if (!loaded) { section.append(loadingNote("Đang tải escalations…")); return section; }
+  if (view.errors.escalations) { section.append(errorNote("Không đọc được escalations — kiểm tra console.")); return section; }
+
+  const all = view.escalations;
+  const open = all.filter((e) => !RESOLVED_STATUSES.has(e.status)).sort((a, b) =>
+    (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9) || (a.ts ?? 0) - (b.ts ?? 0));
+  const resolved = all.filter((e) => RESOLVED_STATUSES.has(e.status));
+
+  if (!open.length) section.append(goodNote("Không có escalation nào đang chờ."));
+  else section.append(h("div", { class: "esc-list" }, open.map(escalationCard)));
+
+  if (resolved.length) {
+    section.append(collapsedGroup(resolved.length + " đã xử lý", resolved.map(resolvedEscalationRow)));
+  }
+  return section;
+}
+
+/* ---------- what a worker says about itself ---------- */
+// The rows a claim adds to a session tile, or none at all — most workers never write one.
+//
+// Never merged into the state badge above it. The badge is observed fact (`claude agents --json`);
+// this is a worker's own account, and board_state tags it `source: "worker_claim"` precisely so
+// the two can never be confused. Where they disagree, board_state publishes BOTH and this prints
+// both: picking a side is how a board ends up confidently wrong, and today three workers reported
+// work as verified when at least one had not run the failing-test check.
+function claimRow(s) {
+  const rows = [];
+  // A refused claim is shown, not swallowed. Silence here is how a worker keeps writing a file
+  // nobody reads — this line is what tells its author the shape is wrong.
+  if (s.claim_ignored) {
+    rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "khai báo"),
+      h("span", { class: "v" }, "bị bỏ qua — " + s.claim_ignored)));
+  }
+  const claim = s.claim;
+  if (claim) {
+    const known = Object.prototype.hasOwnProperty.call(PHASE_LABEL, claim.phase);
+    const age = ageText(claim.updated_at);
+    rows.push(h("div", { class: "session-row" }, h("span", { class: "k" }, "worker nói"),
+      h("span", { class: "v" },
+        // A stale claim keeps its words but loses its colour and gains "(đã cũ)": it is the last
+        // thing the worker said, not what it is doing now, and those must never look alike.
+        pill(claim.stale ? "pill-neutral" : (PHASE_TONE[claim.phase] || "pill-neutral"),
+          (known ? PHASE_LABEL[claim.phase] : String(claim.phase)) + (claim.stale ? " (đã cũ)" : ""),
+          claim.stale ? "khai báo cũ — đây là lần cuối worker tự nói, không phải trạng thái hiện tại" : null),
+        age ? " · " + age + " trước" : null)));
+    if (claim.note) {
+      rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "ghi chú"),
+        h("span", { class: "v" }, claim.note)));
+    }
+    const b = claim.blocked_on;
+    if (b) {
+      rows.push(h("div", { class: "session-row claim-note" }, h("span", { class: "k" }, "ai gỡ được"),
+        h("span", { class: "v" }, b.who + " — " + (BLOCKED_KIND_LABEL[b.kind] || b.kind)
+          + (b.what ? ": " + b.what : ""))));
+    }
+  }
+  const c = s.contradiction;
+  if (c) {
+    rows.push(h("div", { class: "session-row claim-conflict" }, h("span", { class: "k" }, "lệch"),
+      h("span", { class: "v" },
+        "worker nói " + (PHASE_LABEL[c.claim_phase] || c.claim_phase)
+        + ", nhưng phiên đang: " + (STATE_LABEL[c.session_state] || c.session_state)
+        + " — bảng tin phiên, không tin khai báo")));
+  }
+  return rows;
+}
+
+/* ---------- sessions ---------- */
+function sessionTile(s) {
+  const state = STATE_RANK.hasOwnProperty(s.state) ? s.state : "unknown";
+  const refs = Array.isArray(s.ado_refs) ? s.ado_refs : [];
+  return h("div", { class: "session-tile state-" + state },
+    h("div", { class: "state-badge b-" + state },
+      h("span", { class: "state-dot" + (state === "waiting" ? " dot-waiting" : "") }),
+      STATE_LABEL[state] || s.state || "?"),
+    h("div", { class: "session-task" }, s.task || s.id),
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "nhánh"),
+      h("span", { class: "v" }, s.branch || "—")),
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "chạy"),
+      h("span", { class: "v" }, s.started_at ? ageText(s.started_at / 1000) + " trước" : "—")),
+    s.short_id ? h("div", { class: "session-row" }, h("span", { class: "k" }, "id"),
+      h("span", { class: "v" }, s.short_id)) : null,
+    claimRow(s),
+    refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+      const url = ticketUrl(id);
+      return url
+        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+        : h("span", { class: "chip" }, "AB#" + id);
+    })) : null,
+  );
+}
+
+const byStateThenTask = (a, b) =>
+  (STATE_RANK[a.state] ?? 9) - (STATE_RANK[b.state] ?? 9) || String(a.task).localeCompare(String(b.task));
+
+// One collapsible group of sessions: its own count (in the summary text, same "N label" idiom
+// the done-tickets/resolved-escalations subgroups already use) and its own "nothing here" note
+// rather than vanishing when empty — so an operator sees "0 phiên chưa gắn với việc nào" as a
+// real, checked-and-clear state, not a group that silently failed to render.
+function sessionGroup(label, sessions, emptyText, emptyIsGood, openByDefault) {
+  const body = sessions.length
+    ? h("div", { class: "session-grid" }, sessions.map(sessionTile))
+    : (emptyIsGood ? goodNote(emptyText) : loadingNote(emptyText));
+  return collapsedGroup(sessions.length + " " + label, [body], openByDefault);
+}
+
+// An "unknown" state joins "waiting" as "cần bạn xử lý" — the same fail-toward-a-human default
+// classify() already uses for a kind it cannot recognise (escalations.py). It is never "running"
+// or "idle": both would claim a certainty the mirror doesn't have. Gated on `managed` first: an
+// ad-hoc terminal session (no worktree-registry entry — a spike, a smoke test, someone's own
+// interactive session) is not work the manager dispatched, so an unrecognised or stalled state on
+// it is not the manager's alarm to raise. Shared by the assignment cards, the leftover group
+// under them and renderSummary()'s topbar chip so those counts can never drift apart again —
+// that drift (a second copy of this rule going stale) is exactly how the topbar under-counted
+// the section this one replaced.
+function needsAttention(s) {
+  return s.managed && (s.state === "waiting" || s.state === "unknown");
+}
+
+// The join from an assignment to the sessions doing it. A plan step's `owner` is a worktree task
+// name and a session document is keyed by that same name (board_state.session_docs) — the same
+// hop board_state.py's token sum already makes through the registry, resolved here on a field
+// the page is handed outright, so there is no second mapping to keep in step with the first.
+function ownersOf(a) {
+  return (Array.isArray(a.plan) ? a.plan : []).map((s) => s.owner).filter(Boolean);
+}
+function sessionsOf(a, sessions) {
+  const owners = ownersOf(a);
+  return sessions.filter((s) => owners.includes(s.task));
+}
+// The other half of that partition, written against the same ownersOf() so the two can never
+// both drop the same session: everything no OPEN assignment claims — an ad-hoc terminal, or a
+// worker whose assignment was closed out from under it. A session claimed by nobody and drawn
+// nowhere is an alarm the topbar chip counts and the board has no way to show.
+function looseSessions(assignments, sessions) {
+  const owned = new Set(assignments.flatMap((a) => ownersOf(a)));
+  return sessions.filter((s) => !owned.has(s.task));
+}
+
+/* ---------- assignments: the ledger, and the sessions working it ---------- */
+function assignmentCard(a, sessions) {
+  const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
+  const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
+  const steps = Array.isArray(a.plan) ? a.plan : [];
+  const refs = Array.isArray(a.ado_refs) ? a.ado_refs : [];
+  // at_risk / stalled / elapsed_seconds / tokens / eta are all computed by board_state.py from
+  // these very steps and only shown here, never recomputed — the page cannot read a ledger or a
+  // transcript, and one derivation means the numbers and the step list under them cannot
+  // disagree. `progress` is still published for the localhost dashboard but no longer read here:
+  // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
+  const doneSteps = steps.filter((s) => s.state === "done").length;
+  const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
+  const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
+  // The sessions actually doing this work, and the ones among them that have stopped and are
+  // waiting for a person. Both drive the card: the collapsed line says so, and the card opens
+  // itself — nobody clicks a card to discover there is an alarm inside it.
+  const mine = sessions || [];
+  const attention = mine.filter(needsAttention);
+
+  // "chưa rõ", never "0": 0 is a measurement that came back empty, and no transcript is not a
+  // measurement at all. `partial` means some owner session's transcript was unreadable, so the
+  // sum is a floor — "≥" rather than a total presented as complete.
+  const spend = tokens ? tokenText(tokens.spend) : null;
+  const spendText = spend == null ? "chưa rõ" : (tokens.partial ? "≥ " : "") + spend;
+  const cacheText = tokens && tokens.cache_read ? tokenText(tokens.cache_read) + " đọc lại từ cache" : null;
+
+  // Free text a person wrote, shown verbatim — there is no date in "2-3 giờ" or "chờ CTO" to
+  // parse, and pretending otherwise turns a note into a commitment. The projection beside it is
+  // derived from measured pace and is labelled as such every time it appears.
+  const etaParts = [];
+  if (eta) {
+    if (eta.waiting_human) etaParts.push("chờ người" + (eta.owner ? " (" + eta.owner + ")" : ""));
+    if (eta.text) etaParts.push(eta.text);
+    const projected = durationText(eta.projected_seconds);
+    if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
+  }
+
+  const summary = [
+    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
+    pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+      known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+    a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+    a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+    // The alarm the standalone sessions section used to carry, moved onto the one line that is
+    // visible whether or not this card is open.
+    attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null,
+    h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
+    // Which ticket this card is for, on the line visible whether or not the card is open — a
+    // reader scanning the collapsed board must not have to click in to find out.
+    refs.length ? h("span", { class: "session-refs" }, refs.map((id) => {
+      const url = ticketUrl(id);
+      return url
+        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+        : h("span", { class: "chip" }, "AB#" + id);
+    })) : null,
+    h("span", { class: "a-facts mono" },
+      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
+      " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
+      " · token " + spendText,
+      " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
+  ];
+
+  // Everything below only exists once the card is opened. The note is a paragraph of prose and
+  // the plan is every step — together they are what made one assignment fill the screen.
+  const detail = [
+    // First thing an opened card shows: who is on it right now. The old standalone section left
+    // a reader matching a worker name to an assignment by hand; here they arrive together.
+    mine.length ? h("div", { class: "session-grid" }, mine.map(sessionTile)) : null,
+    h("div", { class: "session-row" }, h("span", { class: "k" }, "hạn"),
+      h("span", { class: "v" }, a.deadline || "—")),
+    cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
+      h("span", { class: "v" }, cacheText)) : null,
+    steps.length
+      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
+          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+          const extra = [
+            s.owner ? "ai: " + s.owner : null,
+            s.eta ? "hạn: " + s.eta : null,
+            deps.length ? "sau: " + deps.join(", ") : null,
+          ].filter(Boolean).join(" · ");
+          return h("div", { class: "session-row" },
+            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
+            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
+        }))
+      : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
+    a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
+  ];
+
+  // collapsedGroup() already owns <details>/<summary> everywhere else on this page; the card is
+  // wrapped in its own div rather than growing a fourth argument, so the severity styling stays
+  // exactly the rule .esc-card.sev-* already carries. Condensed by default is the whole point —
+  // the single exception is a card holding a worker that has stopped and is waiting for a person.
+  // That one opens itself, because a click is precisely what nobody makes before it matters.
+  return h("div", { class: "esc-card a-card sev-" + sev },
+    collapsedGroup(summary, detail, attention.length > 0));
+}
+
+function renderAssignments() {
+  const section = h("section", { class: "board-section" });
+  const loaded = view.loaded.assignments;
+  const open = view.assignments.filter((a) => !ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+  // The reason the standalone sessions section existed, kept on the section that absorbed it: a
+  // worker in "đang chờ duyệt" looks exactly like one that is running and has in fact stopped.
+  section.append(sectionHead("Việc đã giao",
+    "Sổ giao việc của manager, kèm phiên đang chạy cho từng việc — “đang chờ duyệt” trông giống " +
+    "đang chạy nhưng thực ra đã đứng lại, cần bạn mở khoá.", loaded ? open.length : null));
+
+  if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
+  if (!loaded) { section.append(loadingNote("Đang tải sổ giao việc…")); return section; }
+  if (view.errors.assignments) { section.append(errorNote("Không đọc được sổ giao việc — kiểm tra console.")); return section; }
+
+  // Same ordering rule as the escalations above: priority first, then whatever is already late,
+  // then oldest. An unrecognised priority sorts last rather than jumping the queue.
+  const byUrgency = (a, b) =>
+    (SEVERITY_RANK[a.priority] ?? 9) - (SEVERITY_RANK[b.priority] ?? 9) ||
+    Number(!!b.at_risk) - Number(!!a.at_risk) ||
+    (a.ts ?? 0) - (b.ts ?? 0);
+  const closed = view.assignments.filter((a) => ASSIGNMENT_CLOSED_STATUSES.has(a.status));
+
+  // Sessions are a second source behind this one section now. An errored or not-yet-loaded
+  // listener must never read as "nothing is running": the cards draw no tiles either way, so the
+  // state is said out loud at the end of the section rather than left to be inferred from
+  // silence — the same rule every other section here already follows.
+  const sessions = view.loaded.sessions && !view.errors.sessions ? view.sessions : [];
+
+  const cards = open.slice().sort(byUrgency).map((a) => ({ a, mine: sessionsOf(a, sessions) }));
+  // Then, above all of it, whatever holds a stopped worker. The group this section absorbed sat
+  // at the top of the page and defaulted open so that alarm could never fall below the fold;
+  // sort() is stable, so byUrgency still decides the order of everything underneath.
+  cards.sort((x, y) => Number(y.mine.some(needsAttention)) - Number(x.mine.some(needsAttention)));
+
+  if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
+  else section.append(h("div", { class: "esc-list" }, cards.map((c) => assignmentCard(c.a, c.mine))));
+
+  // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
+  // them, so dropping them here would throw away the record it went to the trouble of publishing.
+  // Deliberately WITHOUT session tiles: this group is collapsed, so a stopped worker inside one
+  // of these cards would sit two clicks deep. Their sessions fall through to the leftover group
+  // below instead, which opens itself.
+  if (closed.length) {
+    section.append(collapsedGroup(closed.length + " việc đã đóng",
+      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
+  }
+
+  // Everything no open assignment claims — an ad-hoc terminal, or a worker whose assignment was
+  // closed under it. Collapsed at the end like every other tail group on this page, unless one of
+  // them needs a human, for exactly the reason a card holding one opens itself.
+  if (view.errors.sessions) {
+    section.append(errorNote("Không đọc được phiên làm việc — kiểm tra console."));
+  } else if (!view.loaded.sessions) {
+    section.append(loadingNote("Đang tải phiên làm việc…"));
+  } else {
+    const loose = looseSessions(open, view.sessions).sort(byStateThenTask);
+    section.append(sessionGroup("phiên chưa gắn với việc nào đang mở", loose,
+      "Không có phiên nào ngoài các việc trên.", true, loose.some(needsAttention)));
+  }
+  return section;
+}
+
+/* ---------- tickets ---------- */
+function ticketStateTone(state) {
+  if (state === "Blocked") return "pill-bad";
+  if (state === "Active") return "pill-accent";
+  if (state === "Resolved") return "pill-good";
+  return "pill-neutral";
+}
+function ticketPrChip(pr) {
+  if (!pr) return null;
+  const tone = pr.state === "MERGED" ? "pill-good" : pr.state === "OPEN" ? "pill-accent" : "pill-neutral";
+  const label = "PR #" + pr.number + (pr.state ? " · " + pr.state : "");
+  const href = safeHref(pr.url);
+  return href
+    ? h("a", { class: "pill " + tone, href, target: "_blank", rel: "noopener", style: "text-decoration:none;" }, label)
+    : pill(tone, label);
+}
+function ticketRow(t, opts) {
+  opts = opts || {};
+  const href = safeHref(t.url);
+  const cells = [
+    h("td", { class: "num" }, href
+      ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
+      : "AB#" + t.id),
+    h("td", { class: "title-cell" }, t.title || "(không có tiêu đề)"),
+    // Both columns, side by side. The ADO state is a field a person maintains; the one after it
+    // is what the board derived from the evidence — and where the two disagree, that is itself
+    // the thing worth seeing. A null derived status means there is genuinely nothing left to
+    // chase (a closed ticket whose PR merged), never "unknown".
+    h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
+    h("td", {}, t.derived_status
+      ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
+             DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
+      : "—"),
+    h("td", {}, t.sprint || "—"),
+    h("td", {}, t.type || "—"),
+    h("td", {}, ticketPrChip(t.pr) || "—"),
+  ];
+  if (opts.showHolder) cells.push(h("td", {}, t.handed_off_to || "—"));
+  return h("tr", {}, ...cells);
+}
+function ticketTable(rows, opts) {
+  opts = opts || {};
+  const headers = [
+    h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
+    h("th", { title: "Việc này đang chờ ai ra tay — bảng tự suy ra từ PR, escalation và sổ giao việc" },
+      "Chờ ai"),
+    h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
+  ];
+  if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
+  return h("div", { class: "table-wrap" },
+    h("table", { class: "tickets" },
+      h("thead", {}, h("tr", {}, ...headers)),
+      h("tbody", {}, rows.map((r) => ticketRow(r, opts)))));
+}
+
+function renderTickets() {
+  const section = h("section", { class: "board-section" });
+  const loaded = view.loaded.tickets;
+  section.append(sectionHead("Backlog ADO", "chỉ để tham khảo — giao một kết quả, không phải một vé",
+    loaded ? view.tickets.length : null));
+
+  if (!view.db) { section.append(loadingNote("Đang kết nối tới dữ liệu…")); return section; }
+  if (!loaded) { section.append(loadingNote("Đang tải backlog…")); return section; }
+  if (view.errors.tickets) { section.append(errorNote("Không đọc được tickets — kiểm tra console.")); return section; }
+
+  const all = view.tickets;
+  if (!all.length) { section.append(loadingNote("Chưa có vé nào trong backlog.")); return section; }
+
+  const sprints = Array.from(new Set(all.map((t) => t.sprint).filter(Boolean))).sort();
+  const states = Array.from(new Set(all.map((t) => t.state).filter(Boolean))).sort();
+
+  section.append(h("div", { class: "ticket-filters" },
+    h("label", {}, "Sprint",
+      h("select", {
+        onchange: (e) => { ticketFilters.sprint = e.target.value; render(); },
+      },
+        h("option", { value: "", selected: ticketFilters.sprint === "" || null }, "tất cả"),
+        ...sprints.map((s) => h("option", { value: s, selected: ticketFilters.sprint === s || null }, s)))),
+    h("label", {}, "Trạng thái",
+      h("select", {
+        onchange: (e) => { ticketFilters.state = e.target.value; render(); },
+      },
+        h("option", { value: "", selected: ticketFilters.state === "" || null }, "tất cả"),
+        ...states.map((s) => h("option", { value: s, selected: ticketFilters.state === s || null }, s)))),
+  ));
+
+  const filtered = all.filter((t) =>
+    (!ticketFilters.sprint || t.sprint === ticketFilters.sprint) &&
+    (!ticketFilters.state || t.state === ticketFilters.state));
+
+  if (!filtered.length) { section.append(loadingNote("Không có vé khớp bộ lọc.")); return section; }
+
+  // Closed/Removed keep the old rule below regardless of handoff — a ticket already closed is
+  // done, full stop. Only among what is still OPEN does handed_off carve out its own group: work
+  // the owner finished their part of but does not hold any more, so it must not read as "còn mở
+  // của tôi" (still mine) nor get buried inside "đã xong" (which would call a ticket stuck
+  // Blocked at QC "done" — a lie).
+  const done = filtered.filter((t) => TICKET_DONE_STATES.has(t.state)).sort((a, b) => numId(a.id) - numId(b.id));
+  const handedOff = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
+  const open = filtered.filter((t) => !TICKET_DONE_STATES.has(t.state) && !t.handed_off)
+    .sort((a, b) => numId(a.id) - numId(b.id));
+
+  if (open.length) section.append(ticketTable(open));
+  else if (!handedOff.length) section.append(goodNote("Không có việc nào đang mở trong bộ lọc này."));
+
+  if (handedOff.length) {
+    section.append(collapsedGroup(
+      handedOff.length + " đã xong phần của bạn — đang chờ người khác xử lý tiếp",
+      [ticketTable(handedOff, { showHolder: true })]));
+  }
+
+  if (done.length) {
+    const filterIsDoneState = ticketFilters.state && TICKET_DONE_STATES.has(ticketFilters.state);
+    section.append(collapsedGroup(done.length + " việc đã xong", [ticketTable(done)], filterIsDoneState));
+  }
+  return section;
+}
+
+/* ---------- header: connection + summary + freshness ---------- */
+function setConn(state, label) {
+  const dot = document.getElementById("conn-dot");
+  const lbl = document.getElementById("conn-label");
+  if (dot) dot.className = "conn-dot" + (state ? " conn-" + state : "");
+  if (lbl) lbl.textContent = label;
+}
+
+function renderSummary() {
+  const box = document.getElementById("summary");
+  if (!box) return;
+  if (!view.loaded.escalations || !view.loaded.sessions) { box.replaceChildren(); return; }
+  if (view.errors.escalations || view.errors.sessions) {
+    // A source that errored is not "all clear" — it is unknown. Never let those look the same.
+    box.replaceChildren(pill("pill-bad", "Không rõ tình trạng — nguồn dữ liệu bị lỗi"));
+    return;
+  }
+
+  const p0 = view.escalations.filter((e) => e.severity === "P0" && !RESOLVED_STATUSES.has(e.status)).length;
+  const p1 = view.escalations.filter((e) => e.severity === "P1" && !RESOLVED_STATUSES.has(e.status)).length;
+  // Same predicate as the "cần bạn xử lý" section group — this count must never disagree with it.
+  const waiting = view.sessions.filter(needsAttention).length;
+
+  const chips = [];
+  if (p0) chips.push(pill("pill-bad", p0 + " × P0"));
+  if (p1) chips.push(pill("pill-warn", p1 + " × P1"));
+  if (waiting) chips.push(pill("pill-warn", waiting + " phiên cần bạn xử lý"));
+  if (!chips.length) chips.push(pill("pill-good", "Mọi thứ ổn"));
+  box.replaceChildren(...chips);
+}
+
+function freshnessInfo(ts, staleThresholdS) {
+  if (ts == null) return { text: "chưa từng chạy", stale: true, never: true };
+  const s = ageSeconds(ts);
+  // A stamp that is present but not a finite number — a string, a NaN, a half-written doc — was
+  // the worst case of all: ageSeconds() returned null, so ageText() returned null, the text fell
+  // through to "0 giây trước" (the freshest reading the page can print) and `null > threshold`
+  // evaluated false, so it was reported fresh as well. Unreadable has to mean stale.
+  if (s == null) return { text: "không đọc được mốc thời gian", stale: true, never: true };
+  return { text: (ageText(ts) || "0 giây") + " trước", stale: s > staleThresholdS, never: false };
+}
+function freshnessChip(label, info) {
+  return h("span", { class: "pill " + (info.stale ? "pill-warn" : "pill-neutral") },
+    label + ": " + info.text,
+    info.stale ? h("span", {
+      title: info.never ? "Nguồn này không có mốc thời gian dùng được." : "Lâu hơn nhiều so với chu kỳ thường thấy.",
+    }, " ⚠") : null);
+}
+
+// Big, hard-to-miss alarm for ADO staleness — the small chip above is easy to miss, and a dead
+// cron leaves the rest of the board looking perfectly normal for as long as the tab stays open.
+function renderStaleBanner(adoInfo) {
+  const banner = document.getElementById("stale-banner");
+  if (!banner) return;
+  if (!adoInfo || !adoInfo.stale) {
+    banner.hidden = true;
+    banner.replaceChildren();
+    return;
+  }
+  // `never` covers both "no stamp at all" and "a stamp nothing could read" — adoInfo.text already
+  // says which, so the detail line just has to be true of both rather than assert the first.
+  const detail = adoInfo.never
+    ? adoInfo.text
+    : "chưa cập nhật trong " + (adoInfo.text.replace(/ trước$/, ""));
+  banner.hidden = false;
+  banner.replaceChildren(
+    "⚠ Dữ liệu ADO có thể đã lỗi thời: " + detail +
+      " — nhiều khả năng phiên chạy cron đồng bộ đã bị đóng."
+  );
+}
+
+function renderFreshness() {
+  const box = document.getElementById("freshness");
+  if (!box) return;
+  if (view.errors.meta) {
+    // onErr resets view.meta to [] (it is written generically for all four sources), which is
+    // truthy — check the error flag directly rather than let that accidentally read as data.
+    box.replaceChildren(pill("pill-bad", "Không đọc được trạng thái nguồn — kiểm tra console."));
+    renderStaleBanner(null);
+    return;
+  }
+  if (!view.meta) {
+    box.replaceChildren(pill("pill-neutral", view.loaded.meta ? "chưa có meta/status" : "đang tải trạng thái nguồn…"));
+    renderStaleBanner(null);
+    return;
+  }
+  const m = view.meta;
+  const managerChip = m.manager_session_id
+    ? pill("pill-neutral", "Manager: " + String(m.manager_session_id).slice(0, 8) +
+        (m.manager_started_at ? " · lên " + (ageText(m.manager_started_at) || "?") + " trước" : ""))
+    : pill("pill-warn", "Manager: chưa có phiên nào nhận việc");
+
+  const adoInfo = freshnessInfo(m.last_ado_sweep, staleThreshold());
+  box.replaceChildren(
+    freshnessChip("ADO", adoInfo),
+    freshnessChip("Phiên", freshnessInfo(m.last_session_scan, staleThreshold())),
+    managerChip,
+  );
+  renderStaleBanner(adoInfo);
+}
+
+// The "Làm mới" button and the true age of what it re-reads, side by side on purpose.
+//
+// This page is a read-only artifact in a sandbox: no filesystem, no `az`, no way to call back to
+// the machine running the pump timer. The button therefore re-reads the artifact db and NOTHING
+// else — it cannot go fetch newer ADO numbers, and it must never look like it can. The age shown
+// is the pump's own write stamp, so a click that changes nothing leaves the age visibly unchanged
+// too; that is the honest signal, and the note spells it out for anyone who reads it otherwise.
+function renderRefresh() {
+  const box = document.getElementById("refresh");
+  if (!box) return;
+  const writtenAt = view.meta ? view.meta.written_at : null;
+  const info = freshnessInfo(writtenAt, staleThreshold());
+  // No clock at all when there is no usable stamp (missing, or something Date can't read) —
+  // printing "Invalid Date" is noise, and printing anything clock-shaped from a stamp nobody
+  // could parse would be worse. Stale prints the DATE alongside the time: a bare "03:22" next to
+  // "3 ngày trước" is a riddle, and a bare clock is precisely what someone glances at and reads
+  // as today.
+  const clock = (writtenAt == null || info.never)
+    ? null
+    : new Date(writtenAt * 1000).toLocaleString("vi-VN", info.stale
+        ? { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }
+        : { hour: "2-digit", minute: "2-digit" });
+  const age = clock == null
+    ? "chưa rõ dữ liệu tính đến lúc nào"
+    : "dữ liệu tính đến " + clock + " (" + info.text + ")";
+  // The banner above is not enough on its own. THIS is the line someone actually glances at, and
+  // a three-day-old timestamp rendered in the same quiet grey as a two-minute-old one still reads
+  // as current. When the pump has stopped, the number itself has to say so.
+
+  // .filter(Boolean), not a bare null in the argument list: h() drops a null child, but
+  // replaceChildren() renders it as the literal text "null" — which is exactly what the topbar
+  // of a perfectly healthy board showed before this filter existed.
+  box.replaceChildren(...[
+    h("button", {
+      class: "refresh-btn",
+      type: "button",
+      disabled: (view.refresh.busy || !view.db) ? "" : null,
+      title: "Đọc lại dữ liệu mà bộ hẹn giờ đã ghi vào bảng. Trang chạy trong hộp cát nên không tự gọi sang ADO được.",
+      onclick: refresh,
+    }, view.refresh.busy ? "Đang tải lại…" : "Làm mới"),
+    h("span", { class: info.stale ? "refresh-age refresh-age-stale" : "refresh-age" },
+      info.stale ? "⚠ DỮ LIỆU ĐÃ CŨ — " + age : age),
+    h("span", { class: "refresh-note" }, "· chỉ đọc lại dữ liệu bảng, không gọi mới sang ADO"),
+    view.refresh.error ? pill("pill-bad", view.refresh.error) : null,
+  ].filter(Boolean));
+}
+
+/* ---------- data sources ----------
+   One table drives BOTH the live listeners at boot and the manual button above, so a collection
+   can never be wired into one path and forgotten in the other — a "Làm mới" that quietly stopped
+   refreshing one section is the failure this page has no way to show. */
+const docsOf = (snap) => snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+const SOURCES = [
+  { key: "sessions", ref: (db) => db.collection("sessions"), apply: (s) => { view.sessions = docsOf(s); } },
+  { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
+  { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
+  { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  {
+    key: "meta",
+    ref: (db) => db.doc("meta/status"),
+    apply: (s) => {
+      view.meta = s.exists ? s.data() : null;
+      // board_state.py already worked out which sprint is "today" AND whether the backlog has
+      // anything in it — see resolve_default_sprint() — so this just takes that value verbatim.
+      // Once only: a later meta/status update must not override a filter the viewer has since
+      // changed by hand.
+      if (!sprintFilterDefaulted) {
+        sprintFilterDefaulted = true;
+        if (view.meta && view.meta.default_sprint) ticketFilters.sprint = view.meta.default_sprint;
+      }
+    },
+  },
+];
+
+// Manual re-read: the same sources, redrawn through the same render() the 30s tick already uses.
+// Deliberately all-or-nothing — if any source throws, none are applied and the board keeps showing
+// the previous read with the failure said out loud, rather than mixing rows from two different
+// moments with nothing on screen marking which is which.
+async function refresh() {
+  if (!view.db || view.refresh.busy) return;
+  view.refresh.busy = true;
+  view.refresh.error = null;
+  render();
+  try {
+    const snaps = await Promise.all(SOURCES.map((s) => s.ref(view.db).get()));
+    SOURCES.forEach((s, i) => {
+      s.apply(snaps[i]);
+      view.loaded[s.key] = true;
+      // A snapshot listener that errors is terminal — it never fires again, so this manual read is
+      // the only way back. Without clearing the flag the board would keep reporting a source as
+      // broken long after a re-read had proved it was not.
+      view.errors[s.key] = false;
+    });
+  } catch (e) {
+    console.error("refresh", e);
+    view.refresh.error = "Không đọc lại được dữ liệu — số liệu bên dưới vẫn là của lần đọc trước.";
+  } finally {
+    view.refresh.busy = false;
+    render();
+  }
+}
+
+/* ---------- render ---------- */
+function render() { /* draw from `view`; called after every snapshot */
+  const board = document.getElementById("board");
+  if (board) board.replaceChildren(
+    renderEscalations(), renderAssignments(), renderTickets());
+  renderSummary();
+  renderFreshness();
+  renderRefresh();
+}
+
+// Keep "N minutes/seconds ago" honest while the tab just sits open with no new snapshot. Only
+// once connected — while db is unavailable the null-branch below owns #board, and re-running
+// render() here would silently overwrite that panel with the normal empty-state chrome.
+setInterval(() => { if (view.db) render(); }, 30000);
+
+(async () => {
+  render();                                   // at rest, before any data
+  const db = await claude.use("db");          // null: not served, not granted, or failed
+  if (!db) {
+    document.getElementById("board").replaceChildren(
+      Object.assign(document.createElement("div"), {
+        className: "unavailable",
+        textContent: "Không đọc được dữ liệu bảng.",
+      }));
+    setConn("down", "Mất kết nối dữ liệu");
+    return;                                   // never leave the page blank
+  }
+  view.db = db;
+  setConn("live", "Đã kết nối");
+
+  const onErr = (where) => (e) => {
+    // A terminal snapshot error kills that listener; say which source went dark rather than
+    // letting its section quietly freeze at its last value.
+    console.error(where, e);
+    view[where] = [];
+    view.errors[where] = true;
+    view.loaded[where] = true;
+    render();
+  };
+
+  for (const src of SOURCES) {
+    src.ref(db).onSnapshot(
+      (snap) => {
+        src.apply(snap);
+        view.loaded[src.key] = true;
+        view.errors[src.key] = false;
+        render();
+      },
+      onErr(src.key));
+  }
+})();
+</script>
