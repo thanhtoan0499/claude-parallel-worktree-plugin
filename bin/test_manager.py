@@ -2,6 +2,7 @@
 """assert-based checks for manager prompt building, decision parsing, and argv. Run: python3 bin/test_manager.py"""
 
 import json
+import os
 
 from escalations import new_record
 from manager import (
@@ -201,7 +202,7 @@ def test_validate_decision_rejects_non_dict():
 
 def test_resume_argv_targets_the_session():
     argv = resume_argv("sess-abc", "the answer")
-    assert argv[0] == "claude"
+    assert os.path.basename(argv[0]) == "claude"  # absolute now; see manager_session.claude_bin()
     assert "--resume" in argv
     assert argv[argv.index("--resume") + 1] == "sess-abc"
     assert "-p" in argv

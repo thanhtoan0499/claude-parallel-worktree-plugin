@@ -8,6 +8,7 @@ spawning a model.
 import json
 import subprocess
 
+import manager_session
 from escalations import classify, normalize_options
 
 _FENCE = "<<<WORKER_DATA>>>"
@@ -139,7 +140,7 @@ def resume_argv(session_id: str, message: str) -> list[str]:
     starting with a dash (e.g. "--help") is parsed as a flag, `claude` exits 0 printing usage,
     and the message never reaches the session — a silent non-delivery, not a visible error.
     """
-    return ["claude", "--resume", session_id, "-p", "--", message]
+    return [manager_session.claude_bin(), "--resume", session_id, "-p", "--", message]
 
 
 def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:

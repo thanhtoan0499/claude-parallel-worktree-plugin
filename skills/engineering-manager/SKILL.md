@@ -102,6 +102,24 @@ A worker sees only what you write.
 `parallel-task.sh list` shows every copy. `stop` pauses one, `rm` removes the worktree and keeps the
 branch.
 
+Dispatching into a worktree that already exists — a re-dispatch, a second worker in one copy, or a
+worktree someone made by hand — goes through the SAME command. `start` will refuse (the directory
+is there), but `dispatch` adopts it:
+
+    parallel-task.sh dispatch <task-name> "<brief>" --model <model> --effort <level>
+    parallel-task.sh dispatch <new-name> "<brief>" --worktree <path-of-the-existing-worktree>
+
+The first form adopts `.claude/worktrees/<task-name>`; `--worktree` is for when the session name
+and the worktree name differ. Use one of them. **Never launch a worker with a bare `claude --bg`.**
+An unrecorded session is indistinguishable from somebody's own terminal, so everything that asks
+"did we dispatch this?" answers no about a real worker: it is missing from the board's `managed`
+sessions, gets no worker-finished wake, and — the one that bites — is invisible to the
+stuck-session watch, so when it freezes on a prompt nobody will answer, nothing notices. Three
+workers sat outside the registry for exactly this reason on 2026-09-09, and all three froze.
+
+An adopted row records the worktree and its branch but claims no dev stack, so `stop` leaves the
+stack alone and `rm` unregisters the task without deleting a worktree it did not create.
+
 ### Live verification belongs in the brief
 
 Whoever implements a ticket also proves it works in the running product, and hands you the evidence.
@@ -228,7 +246,7 @@ one the CTO can settle with a single click.
 
 ### `kind` is a closed list
 
-Pick one of these twelve, spelled exactly. It decides who may answer and how loudly the board
+Pick one of these thirteen, spelled exactly. It decides who may answer and how loudly the board
 shouts, so an invented name is not a harmless label.
 
 | `kind` | Use it when |
@@ -245,8 +263,12 @@ shouts, so an invented name is not a harmless label.
 | `looping` | A worker is repeating itself and needs redirecting |
 | `pick_implementation` | Two workable designs, one has to be chosen |
 | `scope_question` | In or out of scope for this piece of work |
+| `stuck_session` | A worker is frozen on a prompt nobody is there to answer |
 
-The first eight always reach a human; the last four the manager may settle alone — except that
+`stuck_session` is the one nothing files by hand: `bin/stuck_sessions.py` files it on a timer,
+and clears it again the moment the session starts moving. See bin/systemd/README.md.
+
+The first eight always reach a human; the last five the manager may settle alone — except that
 evidence overrules the kind, so anything irreversible, dependency-adding, migration-touching,
 secret-adjacent, or aimed at `main` goes to a human whatever it calls itself.
 

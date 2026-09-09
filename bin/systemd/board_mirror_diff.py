@@ -74,9 +74,51 @@ def diff_writes(previous: dict, writes: list[dict]) -> list[dict]:
     deletes = [
         {"op": "delete", "collection": key.split("/", 1)[0], "doc_id": key.split("/", 1)[1]}
         for key in previous
-        if key not in current_keys
+        if key not in current_keys and not _unswept(key, meta)
     ]
+    _warn_on_bulk_delete(previous, deletes)
     return changed + deletes + [meta]
+
+
+def _unswept(key: str, meta: dict) -> bool:
+    """True when `key` belongs to a collection this run did not authoritatively sweep, so its
+    absence from `writes` means "not reported", not "gone".
+
+    Only `tickets` has such a signal, and it already exists: meta/status.last_ado_sweep is null
+    exactly when board_state._safe() caught the ADO reader failing. Absent that guard, a sweep
+    that did not run published zero tickets and every previously-known ticket row read as
+    deleted — 140 rows off the CTO's board from one failed `az` call, with the deletes and the
+    real thing looking identical from here.
+
+    Deliberately keyed to that one flag rather than a general "collection is empty in this run"
+    rule: sessions legitimately drop to zero whenever no worker is running, and refusing to
+    reconcile an empty collection would strand those rows forever. Absence is only ambiguous
+    where a reader can fail; it is `tickets` that carries the evidence of which happened.
+    """
+    return key.startswith("tickets/") and (meta.get("data") or {}).get("last_ado_sweep") is None
+
+
+# A whole-collection wipe is the shape every silent-truncation bug takes here, and nothing in the
+# pump ever said it happened: run-board-mirror.sh's journal line counts sets and deletes together
+# as "wrote N documents", so 140 deleted tickets and 140 refreshed ones logged identically. This
+# does not gate anything — a real bulk removal must still go through, and a threshold that
+# refused would wedge, since the next run compares against the same unchanged snapshot and would
+# refuse again forever. It just makes the event greppable in the journal.
+# ponytail: log-only. Make it a gate only with a signal that clears itself — e.g. requiring the
+# drop to repeat on a second consecutive run — never a bare fraction.
+_BULK_DELETE_FRACTION = 0.5
+
+
+def _warn_on_bulk_delete(previous: dict, deletes: list[dict]) -> None:
+    for collection in {d["collection"] for d in deletes}:
+        was = sum(1 for k in previous if k.split("/", 1)[0] == collection)
+        now = sum(1 for d in deletes if d["collection"] == collection)
+        if was and now >= was * _BULK_DELETE_FRACTION:
+            print(
+                f"board_mirror_diff: deleting {now} of {was} {collection} documents "
+                f"— verify this is a real removal and not a truncated read",
+                file=sys.stderr,
+            )
 
 
 def _sendable(writes: list[dict]) -> list[dict]:
@@ -106,6 +148,30 @@ def chunk_writes(entries: list[dict], limit: int = BATCH_LIMIT) -> list[list[dic
     had no way to tell which of them actually landed.
     """
     return [entries[i : i + limit] for i in range(0, len(entries), limit)]
+
+
+HEARTBEAT_KEY = "meta/pump"
+
+
+def stamp_heartbeat(batches: list[list[dict]]) -> list[list[dict]]:
+    """Add the backlog size to the heartbeat, if the first batch leads with one.
+
+    board_state.py mints meta/pump first and knows only when the run started; only here is the
+    batch count known at all. The two together are what let the board tell a pump draining a
+    backlog from one that has stopped: `ran_at` moves every run, and `batches_pending` shrinks
+    run over run. Neither says anything about whether the data is complete — that claim belongs
+    to meta/status alone, which rides the LAST batch and so lands only on a run that finished.
+
+    One number, not a total and a remainder: the heartbeat rides the FIRST batch, so the only
+    figure it can honestly carry is how much this run found to do. `batches_pending == 1` means
+    this run expects to finish and stamp meta/status; anything more means the board is looking at
+    data that is still catching up.
+    """
+    if not batches or _key(batches[0][0]) != HEARTBEAT_KEY:
+        return batches
+    head = dict(batches[0][0])
+    head["data"] = {**head["data"], "batches_pending": len(batches)}
+    return [[head] + batches[0][1:]] + batches[1:]
 
 
 def apply_batch(previous: dict, batch: list[dict]) -> dict:
@@ -177,7 +243,7 @@ def main() -> int:
 
     if mode == "chunk":
         limit = int(argv[1]) if len(argv) == 2 else BATCH_LIMIT
-        for batch in chunk_writes(payload, limit):
+        for batch in stamp_heartbeat(chunk_writes(payload, limit)):
             json.dump(batch, sys.stdout, ensure_ascii=False)
             sys.stdout.write("\n")
         return 0

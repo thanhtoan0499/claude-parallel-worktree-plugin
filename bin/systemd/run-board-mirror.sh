@@ -9,7 +9,10 @@
 # board_state.py runs right here in bash, not inside the `claude -p` session: this script already
 # has a shell, and running it here means a failure shows up as this script's own exit code instead
 # of the model having to run a Bash step and report back — which also means `claude -p` never
-# needs Bash permission (see the permission-mode comment below).
+# needs Bash permission (see the permission-mode comment below). The one thing this script does
+# NOT run itself is reading the artifact db back for board answers — only the session has
+# credentials for the artifact — so that rides along in every batch's own prompt; see the answers
+# step inside the loop, right after each batch's $RESULT is decoded.
 #
 # board_mirror_diff.py, also run right here rather than inside the session, cuts board_state.py's
 # full write set down to only what changed since the last successful run (see its own docstring
@@ -163,8 +166,9 @@ for ((i = 0; i < ${#BATCHES[@]}; i++)); do
 
   # `claude -p` is non-interactive: nothing can click "approve" a permission prompt, so without a
   # grant covering every tool the prompt actually uses, the run dies with "requires permission
-  # approval that was not granted". The prompt above only ever asks Claude to write_db —
-  # board_state.py and board_mirror_diff.py both run in this shell, not inside the session.
+  # approval that was not granted". The prompt above only ever asks Claude to write_db and
+  # read_db — board_state.py, board_mirror_diff.py and board_mirror_answers.py all run in this
+  # shell, not inside the session.
   #
   # `--allowedTools Artifact` looks like it should be enough and ISN'T — verified live (2026-09-08)
   # with a real `claude -p` run that actually tried to write_db one document and read back the
@@ -189,12 +193,30 @@ for ((i = 0; i < ${#BATCHES[@]}; i++)); do
 
   RESULT="$(decode_result <<<"$RAW_OUTPUT")" || exit 1
 
-  # board-mirror.md now asks for a bare one-line reply, but the model isn't guaranteed to comply —
+  # The one thing here that travels the other way: everything else in this loop pushes state up,
+  # this brings a decision the CTO made ON the board back down into the manager's ledger.
+  # board-mirror.md's step 2 asks this SAME batch session (no dedicated `claude -p` of its own —
+  # see board-mirror.md's comment on why) to read the `escalation_answers` collection back and
+  # print it after an `ANSWERS:` marker; board_mirror_answers.py decides what of that may be
+  # appended. Its docstring holds the never-clobber and idempotency rules, both decided against
+  # the ledger rather than against the payload — which is also why running this once per batch
+  # rather than once per round is safe: an answer already applied by an earlier batch this round
+  # is simply not accepted again.
+  #
+  # Guarded, and deliberately placed BEFORE the OK_LINE branch below, so the two directions cannot
+  # take each other down: a failure here is a journal warning and nothing more — this batch's
+  # write has already landed — and a batch whose write FAILED still gets its answers applied,
+  # because this runs before that branch exits the whole script.
+  if ! printf '%s' "$RESULT" | python3 "$SCRIPT_DIR/board_mirror_answers.py" apply; then
+    echo "run-board-mirror: bringing board answers down failed on batch $((i + 1)) (non-fatal) — the mirror itself is unaffected" >&2
+  fi
+
+  # board-mirror.md now asks for a two-line reply, but the model isn't guaranteed to comply —
   # a live run answered with a lead-in sentence before the REFRESH_OK line. Match REFRESH_OK: as a
   # substring of any line, not just an exact-match whole string, so a stray prefix doesn't get read
-  # as failure (which, via the snapshot-only-on-success write below, would silently defeat the
-  # whole diff-instead-of-full-resend point of this script forever). REFRESH_FAILED or no
-  # REFRESH_OK anywhere still falls through to the failure branch below.
+  # as failure (which, via the checkpoint below, would silently defeat the whole
+  # diff-instead-of-full-resend point of this script forever). REFRESH_FAILED or no REFRESH_OK
+  # anywhere still falls through to the failure branch below.
   OK_LINE="$(grep -m1 'REFRESH_OK:' <<<"$RESULT" || true)"
   if [[ -z "$OK_LINE" ]]; then
     echo "run-board-mirror: batch $((i + 1))/${#BATCHES[@]} did not report success: $RESULT" >&2

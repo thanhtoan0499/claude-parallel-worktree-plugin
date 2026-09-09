@@ -84,22 +84,32 @@ def registry_session_ids(path: str | None = None) -> set:
     return {entry["session_id"] for entry in registry.values() if isinstance(entry, dict) and entry.get("session_id")}
 
 
-def list_agents(run=subprocess.run) -> list[dict]:
+def list_agents(run=subprocess.run, all_sessions: bool = True) -> list[dict]:
     """Every session Claude Code knows about, or an empty list if the call fails.
 
     Degrading to empty rather than raising keeps a transient CLI failure from aborting the
     escalation pass, which is the more important half of a daemon cycle.
+
+    `all_sessions=False` drops `--all` and asks only for the sessions still current. The daemon
+    wants `--all` — it watches for a worker TRANSITIONING to done, and a session that dropped off
+    the live list has still finished. A caller looking for sessions to act on wants the opposite:
+    `--all` returned 69 rows here against 18 live ones, 32 of them for worktrees deleted days or
+    months ago, and those corpses are what a by-hand stuck-session check cried wolf about.
     """
     try:
         proc = run(
-            ["claude", "agents", "--json", "--all"],
+            [manager_session.claude_bin(), "agents", "--json"] + (["--all"] if all_sessions else []),
             capture_output=True,
             text=True,
             check=True,
             timeout=30,
         )
         agents = json.loads(proc.stdout)
-    except SUBPROC_ERRORS:
+    except SUBPROC_ERRORS as exc:
+        # Named, not swallowed. "Could not look" and "nothing is running" were the same empty
+        # list here, and the pump ran for days on the first while everything downstream read the
+        # second — see claude_bin() for what that cost.
+        print(f"manager_daemon: list_agents failed, reporting no sessions: {exc}", file=sys.stderr)
         return []
     return agents if isinstance(agents, list) else []
 

@@ -1,0 +1,23 @@
+[Unit]
+Description=Look for a dispatched worker frozen on a prompt nobody will answer, every 5 minutes
+
+[Timer]
+# :04, :09, :14 ... :59. Same 5-minute cadence as board-mirror, deliberately NOT the same
+# instant: a record filed at :04 is on the board by :07, and the two jobs never contend for the
+# `claude` CLI. board-mirror.timer's comment has the reasoning for avoiding the round marks.
+#
+# This period is not just a schedule — bin/stuck_sessions.py parses it back out of THIS FILE
+# (timer_period_seconds) and multiplies it by CLAIM_STALE_MULTIPLIER to size how long a session
+# must be silent before it counts as stuck. Retune the cadence and the window follows; there is
+# no constant anywhere to go stale behind it. A form timer_period_seconds cannot parse makes the
+# watch file nothing and say so — bin/test_stuck_sessions.py guards that.
+OnCalendar=*-*-* *:4/5:00
+# A missed fire needs no catch-up: a session that was stuck while the machine slept is still
+# stuck at the next fire, five minutes later, and would file the identical record.
+Persistent=false
+# A plain (non-templated) `oneshot` service, so systemd can only have one instance active — a
+# fire landing on a still-running scan is coalesced into a no-op. The scan is idempotent anyway
+# (see stuck_sessions.scan), this just means it never has to prove it under a race.
+
+[Install]
+WantedBy=timers.target

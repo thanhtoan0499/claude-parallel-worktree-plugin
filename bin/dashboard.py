@@ -252,7 +252,8 @@ def get_sessions() -> list[dict]:
 
     def run():
         result = subprocess.run(
-            ["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=20
+            [manager_session.claude_bin(), "agents", "--json", "--all"],
+            capture_output=True, text=True, check=True, timeout=20,
         )
         return json.loads(result.stdout)
 
@@ -270,16 +271,9 @@ def get_github_prs(repo_root: str) -> list[dict]:
     updates REPO_DIR — the same trap read_registry() in board_state.py works around already.
     """
 
-    def run():
+    def gh_pr_list(state, fields):
         result = subprocess.run(
-            # `reviewDecision` and `statusCheckRollup` ride along on the call that was already
-            # being made — `gh` returns them for free and a second call would double the sweep's
-            # latency AND be able to disagree with the first about which PRs exist. They are what
-            # lets the board tell "waiting for review" from "waiting for someone to click merge",
-            # which is the whole difference between a ticket needing a person and a ticket needing
-            # the CTO. See board_state.prs_by_ticket()/ticket_status().
-            ["gh", "pr", "list", "--state", "all", "--limit", "500", "--json",
-             "number,title,url,state,isDraft,reviewDecision,statusCheckRollup"],
+            ["gh", "pr", "list", "--state", state, "--limit", "500", "--json", fields],
             capture_output=True,
             text=True,
             check=True,
@@ -287,6 +281,32 @@ def get_github_prs(repo_root: str) -> list[dict]:
             cwd=repo_root,
         )
         return json.loads(result.stdout)
+
+    def run():
+        # `reviewDecision` rides along free; `statusCheckRollup` does NOT. GitHub resolves the
+        # check rollup per PR, so asking for it across `--state all --limit 500` took 42.5s
+        # against this call's own 20s timeout — measured on the repo the board pump actually
+        # sweeps. Every run hit the timeout, fell back to {} and blanked the board's PR column,
+        # while still spending 20s of the pump's budget to do it.
+        #
+        # Split, measured on that same repo: the wide sweep without the rollup is 12.5s for all
+        # 500 PRs, and an open-only rollup lookup is 1.6s for the 11 that have one. Nothing is
+        # lost — board_state.ticket_status() reads `checks` only inside `if pr["state"] ==
+        # "OPEN"`, so the rollup was being fetched for 489 PRs that never consult it. A merged
+        # PR's CI is history, not a signal.
+        #
+        # Two calls CAN disagree about which PRs exist, which is why the second is joined onto
+        # the first by number rather than replacing it: a PR that closed between the two simply
+        # gets no rollup, and one that opened is absent from the wide sweep either way.
+        prs = gh_pr_list("all", "number,title,url,state,isDraft,reviewDecision")
+        rollups = {
+            pr.get("number"): pr.get("statusCheckRollup")
+            for pr in gh_pr_list("open", "number,statusCheckRollup")
+        }
+        for pr in prs:
+            if pr.get("state") == "OPEN" and pr.get("number") in rollups:
+                pr["statusCheckRollup"] = rollups[pr["number"]]
+        return prs
 
     return _cached(f"github_prs:{repo_root}", run, ttl=_ENRICH_TTL)
 
@@ -327,6 +347,19 @@ def _ado_assignee_clause() -> str:
     id_fields = ("[System.AssignedTo]", "[Microsoft.VSTS.Common.ActivatedBy]")
     people = [p.replace("'", "''") for p in _ado_identities()]
     if not people:
+        # Said out loud, because this is the one degradation here that looks exactly like a
+        # correct answer: @Me returns a real, well-formed, SHORTER backlog. Measured on this
+        # project 2026-09-09 — two identities union to 168 tickets, @Me alone returns 21 — so a
+        # run that loses this variable publishes an eighth of the board with no error anywhere,
+        # and board_mirror_diff.py reconciles the missing seven eighths away. run-board-mirror.sh
+        # guards ARTIFACT_URL and PWT_REPO_ROOT with `:?` and cannot guard this one, because a
+        # single-identity install is a legitimate configuration; a journal line is what makes the
+        # difference between the two visible after the fact.
+        print(
+            "dashboard: PWR_ADO_ASSIGNED_TO is unset — the backlog covers only the identity `az` "
+            "is logged in as (WIQL @Me), not every identity of the board owner",
+            file=sys.stderr,
+        )
         return "(" + " OR ".join(f"{f} = @Me" for f in id_fields) + ")"
     joined = ", ".join(f"'{p}'" for p in people)
     return "(" + " OR ".join(f"{f} IN ({joined})" for f in id_fields) + ")"
@@ -373,10 +406,26 @@ def _ado_identity_ref(value) -> dict:
 
 
 def get_ado_backlog() -> list[dict]:
-    """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
-    failure (az not authenticated, network down) degrades to an empty backlog, same as every
-    other subprocess-backed source in this file — a dashboard that can't reach ADO still shows
-    live sessions."""
+    """Tickets assigned to you, not closed — the manager's read-only view into ADO.
+
+    RAISES when the sweep did not run, and returns [] only for a sweep that ran and matched
+    nothing. Those two were the same value here until 2026-09-09, and collapsing them is what
+    let a failed `az` call delete ticket rows off the published board: board_state.py's contract
+    (see its `read_tickets=` comment) is that only an exception means "did not run", and a
+    function written never to raise made that contract unenforceable — `_safe` stamped
+    last_ado_sweep on a sweep that never happened, and board_mirror_diff.py turned the resulting
+    empty ticket set into a delete per row.
+
+    This is the one reader in this file that does NOT degrade to empty, on purpose. The others
+    (get_ado_iterations, get_registry) degrade because their failure costs a derived nicety;
+    this one's failure costs the rows themselves. Both callers are already built for it:
+    board_state.py wraps it in `_safe()`, and /api/ado-tickets already answers 500 on any
+    exception — a better answer for a human than an empty table that reads as a finished sprint.
+
+    `az` prints `null`, not `[]`, when the query matches nothing. That IS a successful empty
+    sweep, so it is normalized to [] here rather than left to raise on iteration — otherwise the
+    one case the contract calls "successful and empty" would be reported as a failure.
+    """
 
     def run():
         result = subprocess.run(
@@ -386,10 +435,11 @@ def get_ado_backlog() -> list[dict]:
             timeout=20,
         )
         if result.returncode != 0:
-            return []
-        rows = json.loads(result.stdout)
+            raise RuntimeError(
+                f"az boards query exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+            )
         tickets = []
-        for r in rows:
+        for r in json.loads(result.stdout) or []:
             fields = r.get("fields") or {}
             tickets.append(
                 {
@@ -400,10 +450,7 @@ def get_ado_backlog() -> list[dict]:
             )
         return tickets
 
-    try:
-        return _cached("ado_backlog", run, ttl=60.0)
-    except _SUBPROC_ERRORS:
-        return []
+    return _cached("ado_backlog", run, ttl=60.0)
 
 
 def _iteration_leaves(node: dict) -> list[dict]:
@@ -427,9 +474,10 @@ def _iteration_leaves(node: dict) -> list[dict]:
 def get_ado_iterations() -> list[dict]:
     """Every sprint/iteration this project defines, with its date range — the ONLY place sprint
     boundaries live. A ticket's `System.IterationPath` is just a name; ADO never puts a date on
-    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Same
-    degrade-to-empty contract as get_ado_backlog(): `az` failing must not blank the board, it
-    just leaves board_state.py unable to compute a default sprint filter."""
+    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Unlike
+    get_ado_backlog(), this one DOES degrade to empty: `az` failing here costs only the default
+    sprint filter (the page falls back to "tất cả"), never a row, so there is nothing for a
+    caller to tell apart."""
 
     def run():
         result = subprocess.run(

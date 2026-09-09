@@ -783,7 +783,9 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert _writes_for(writes, "sessions")[0]["doc_id"] == "t1"
     assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
     assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
-    assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+    # Two meta documents now, at opposite ends: the pump heartbeat leads, the completeness
+    # stamp trails. See test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last.
+    assert [w["doc_id"] for w in _writes_for(writes, "meta")] == ["pump", "status"]
     # Sessions, escalations AND tickets are all non-empty here — unlike the dedicated
     # "meta last" test below (which only populates sessions), this actually discriminates
     # "last overall" from "last among the only populated collection".
@@ -838,6 +840,36 @@ def test_build_writes_truncates_a_doc_id_past_the_200_character_limit():
     assert [len(w["doc_id"]) for w in writes if w["collection"] == "sessions"] == [200]
 
 
+def test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last():
+    # Two different claims, two different documents, at opposite ends of the run on purpose.
+    # meta/status says "the rows beside me are complete", so it goes last and only a run that
+    # finished ever writes it. meta/pump says "the pump is alive and just ran", which is true the
+    # moment the run starts, so it goes FIRST and therefore lands in batch 1 of every run —
+    # including the partial ones checkpointing made routine. Without it the board's only clock
+    # was meta/status, which now freezes for the whole length of a backlog drain while data is
+    # visibly flowing, and the staleness alarm fires on a perfectly healthy pump.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, assignments=[],
+    )
+
+    assert (writes[0]["collection"], writes[0]["doc_id"]) == ("meta", "pump")
+    assert (writes[-1]["collection"], writes[-1]["doc_id"]) == ("meta", "status")
+    assert writes[0]["data"]["ran_at"] == 1788900000.0
+
+
+def test_the_heartbeat_never_claims_the_data_is_complete():
+    # Everything that says "as of when" stays on meta/status. If the heartbeat carried a sweep
+    # time too, a partial run would stamp it and the board would call incomplete data current —
+    # the exact property meta/status-goes-last exists to protect.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, ado_swept_at=1788900000.0, assignments=[],
+    )
+
+    assert set(writes[0]["data"]) == {"ran_at"}
+
+
 def test_build_writes_puts_meta_status_last():
     """`meta/status` claims the data alongside it is current. Written first, a batch that dies
     halfway would advertise a sweep whose rows never landed."""
@@ -869,8 +901,7 @@ def test_build_writes_on_empty_sources_still_writes_meta():
     from a sweep that never ran, and only meta/status can say which."""
     writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
 
-    assert len(writes) == 1
-    assert writes[0]["doc_id"] == "status"
+    assert [w["doc_id"] for w in writes] == ["pump", "status"]
 
 
 # --- Coverage added beyond the brief -----------------------------------------------------
@@ -919,7 +950,7 @@ def test_build_writes_data_matches_the_underlying_transform_for_each_collection(
     assert _writes_for(writes, "sessions")[0]["data"] == session_docs(agents, registry)["t1"]
     assert _writes_for(writes, "escalations")[0]["data"] == escalation_docs(escalations)["e1"]
     assert _writes_for(writes, "tickets")[0]["data"] == ticket_docs(tickets, pr_by_ticket)["8311"]
-    assert _writes_for(writes, "meta")[0]["data"] == meta_status(
+    assert _writes_for(writes, "meta")[-1]["data"] == meta_status(
         now=1234.0, ado_swept_at=999.0, sessions_scanned_at=1234.0, manager=manager
     )
 
@@ -977,11 +1008,11 @@ def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or
         now=1000.0,
     )
 
-    assert len(writes) == 7
+    assert len(writes) == 8
     assert len(_writes_for(writes, "sessions")) == 2
     assert len(_writes_for(writes, "escalations")) == 2
     assert len(_writes_for(writes, "tickets")) == 2
-    assert len(_writes_for(writes, "meta")) == 1
+    assert len(_writes_for(writes, "meta")) == 2  # pump heartbeat + completeness stamp
     assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
     assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
     assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}
@@ -3537,3 +3568,366 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
     assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The assignment card — "Việc đã giao".
+#
+# Three rules, two of them the CTO's own words:
+#   - priority is the manager's business, not his ("tôi ko quan tâm P1 hay quan trọng mức thấp gì
+#     hết ... tôi tin tưởng bạn"), so it must not open the card — but it must stay in the data and
+#     keep deciding the order, because dropping a label is a UI change, not a schema change;
+#   - the plan must answer "where is this work right now". A row per step was already tried and
+#     rejected: "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì";
+#   - and nothing may be left to be inferred from a missing row — the same rule renderAssignments
+#     already follows when the sessions listener has not loaded.
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_card_does_not_open_with_a_priority_pill():
+    """The pill was the first thing the eye landed on and the least useful thing on the card.
+    No P-word label anywhere in it."""
+    src = _assignment_card_source()
+    assert "SEVERITY_LABEL" not in src, "the card still renders the priority label"
+    assert "SEVERITY_TONE" not in src, "the card still renders the priority pill's tone"
+
+
+def test_priority_survives_the_pill_being_dropped():
+    """board_state still publishes it, the localhost dashboard still reads it, and the board still
+    sorts by it. Deleting the pill must not delete the field underneath."""
+    from board_state import assignment_docs
+
+    docs = assignment_docs([{"id": "a1", "title": "x", "priority": "P0", "ts": 1.0}], 2.0)
+    assert docs["a1"]["priority"] == "P0", "board_state stopped publishing priority"
+    assert re.search(r"SEVERITY_RANK\[a\.priority\]", _board_html_script()), (
+        "the board stopped ordering assignments by priority"
+    )
+
+
+def test_assignment_card_buckets_its_steps_instead_of_one_row_per_step():
+    """The finished steps collapse to a count — nobody needs to re-read what is already behind
+    them — and only what is running and what is left stay spelled out."""
+    src = _assignment_card_source()
+    assert "STEP_STATE_LABEL[st]" not in src, "the card still prints a state label per step"
+    for label in ('"đã xong"', '"đang làm"', '"còn lại"'):
+        assert label in src, f"the step list has no {label} bucket"
+
+
+def test_assignment_card_says_out_loud_when_no_step_is_running():
+    """A missing "đang làm" row would read as "nothing is running" by inference, and an inference
+    is exactly what this board refuses to make a reader do."""
+    assert "chưa có bước nào đang chạy" in _assignment_card_source()
+
+
+def test_assignment_card_still_names_an_unrecognised_step_state():
+    """STEP_STATE_LABEL exists because an unlabelled state renders as nothing at all, and nothing
+    at all reads as "not started". Bucketing must not quietly fold "unknown" into "còn lại"."""
+    src = _assignment_card_source()
+    assert '"không rõ"' in src, "an unrecognised step state has no bucket of its own"
+
+
+def test_step_detail_moves_to_hover_rather_than_onto_the_row():
+    """owner / eta / depends_on are secondary, and the CTO offered hover for exactly this ("khi mà
+    expose ra ko collapse hoặc hover vô"). title= needs no JS and cannot move the layout."""
+    src = _assignment_card_source()
+    assert "depends_on" in src, "dependencies vanished from the card entirely"
+    assert re.search(r"title:\s*stepDetail\(", src), "step detail is not offered on hover"
+
+
+def test_the_collapsed_step_count_answers_where_the_work_is_on_hover():
+    """"1/4 bước" on its own says nothing. Collapsed is where the board is actually read, so the
+    answer the opened card gives hangs off that count too rather than costing a click."""
+    src = _assignment_card_source()
+    assert re.search(r"title:\s*stepHint", src), "the collapsed step count carries no hover hint"
+    assert '"đang làm: "' in src, "the hover hint never names the step that is running"
+
+
+def test_assignment_summary_keeps_the_ticket_chip():
+    """The one thing the CTO said he actually wants on this card. It was already correct — dropping
+    the pill in front of it must not take it along."""
+    assert '"AB#"' in _card_part("summary"), "the ADO ticket chip left the summary line"
+
+
+def test_assignment_card_reads_title_before_status_before_duration_before_token_before_ticket_before_steps_before_estimate():
+    """The CTO read the card back to us in this order: "tên task đang làm, light tip status, chạy
+    bao lâu rồi, token nếu có, ticket relevant, qua những step nào rồi... còn những step nào?
+    estimate?". The summary line's DOM order must match, not just contain the same facts."""
+    summary = _card_part("summary")
+    markers = ["a-title", "ASSIGNMENT_STATUS_TONE", '"chạy"', '"token"', "ticketUrl", '"bước"', '"xong"']
+    positions = [summary.index(m) for m in markers]
+    assert positions == sorted(positions), f"reading order is wrong: {list(zip(markers, positions))}"
+
+
+def test_assignment_card_hides_an_unmeasured_token_row_instead_of_repeating_chua_ro():
+    """"token chưa rõ" on every single card is noise, not information — the CTO's own complaint
+    about anything that repeats the same non-answer on every tile."""
+    summary = _card_part("summary")
+    assert re.search(r"spend\s*!=\s*null\s*\?", summary), (
+        "the token row must be conditional on a measured spend, not always rendered"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section order — Backlog leads unless something is actually open ("Cần quyết định").
+# ---------------------------------------------------------------------------
+
+
+def _js_const(name, src=None):
+    src = _board_html_script() if src is None else src
+    m = re.search(r"const " + name + r"\s*=\s*(.*?;)", src, re.S)
+    assert m, f"const {name} not found in board.html"
+    return "const " + name + " = " + m.group(1)
+
+
+def _run_node(snippet):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover - node is present in this repo's dev env
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", snippet], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_escalations_go_first_only_while_something_is_actually_open():
+    src = _board_html_script()
+    prelude = "\n".join([_js_const("RESOLVED_STATUSES", src), _js_function("escalationsGoFirst", src)])
+    cases = """
+    console.log(JSON.stringify([
+      escalationsGoFirst(true, false, []),
+      escalationsGoFirst(true, false, [{status: "open"}]),
+      escalationsGoFirst(true, false, [{status: "answered"}, {status: "dismissed"}]),
+      escalationsGoFirst(false, false, []),
+      escalationsGoFirst(true, true, []),
+    ]));
+    """
+    out = _run_node(prelude + "\n" + cases)
+    assert out == "[false,true,false,true,true]", out
+
+
+def test_render_promotes_the_backlog_when_nothing_is_open_but_keeps_escalations_first_otherwise():
+    """Textual check on render() itself — the pure decision function above is exercised in node,
+    this proves render() actually branches on it rather than always drawing one fixed order."""
+    script = _board_html_script()
+    body = re.search(r"function render\(\)\s*\{(.*?)\n\}\n", script, re.S)
+    assert body, "render() not found"
+    assert "escalationsGoFirst(" in body.group(1), "render() never consults the ordering decision"
+    assert re.search(r"renderTickets\(\),\s*renderAssignments\(\),\s*renderEscalations\(\)", body.group(1)), (
+        "no branch puts Backlog ahead of both other sections"
+    )
+    assert re.search(r"renderEscalations\(\),\s*renderTickets\(\),\s*renderAssignments\(\)", body.group(1)), (
+        "no branch keeps escalations first when something is open"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backlog row -> the assignment card working it ("Chờ ai" links down, "Đang làm gì" is new).
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
+    prelude = _js_function("assignmentForTicket")
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [
+          { id: "a1", ado_refs: ["100", "200"] },
+          { id: "a2", ado_refs: ["300"] },
+        ];
+        console.log(JSON.stringify([
+          (assignmentForTicket("200", assignments) || {}).id || null,
+          (assignmentForTicket("999", assignments) || {}).id || null,
+        ]));
+        """
+    )
+    assert out == '["a1",null]', out
+
+
+def test_ticket_current_action_reads_the_running_step_from_a_claiming_assignment():
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [{
+          id: "a1", ado_refs: ["100"],
+          plan: [{ step: "viết test đỏ", state: "done" }, { step: "chạy Playwright verify", state: "doing" }],
+        }];
+        console.log(ticketCurrentAction({ id: "100" }, assignments));
+        """
+    )
+    assert out == "chạy Playwright verify", out
+
+
+def test_ticket_current_action_says_no_runner_when_the_claiming_assignment_has_no_running_step():
+    """The exact same sentence the assignment card itself uses (NO_RUNNER_TEXT) — two places on
+    one page must never describe "nobody is running a step right now" differently."""
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], plan: [{ step: "x", state: "todo" }] }];
+        console.log(ticketCurrentAction({ id: "100" }, assignments));
+        """
+    )
+    assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
+
+
+def test_ticket_current_action_infers_the_next_move_when_nobody_has_claimed_the_ticket():
+    script = _board_html_script()
+    prelude = "\n".join(_js_function(name, script) for name in
+                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
+    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
+    prelude += "\n" + _js_function("ticketCurrentAction", script)
+    out = _run_node(
+        prelude
+        + """
+        const rows = [
+          { id: "1", state: "Blocked" },
+          { id: "2", pr: { state: "OPEN" } },
+          { id: "3", derived_status: "unclaimed" },
+          { id: "4", state: "Active" },
+        ];
+        console.log(JSON.stringify(rows.map((t) => ticketCurrentAction(t, []))));
+        """
+    )
+    assert out == '["đang bị chặn — chờ người xử lý","chờ review / merge PR","cần giao việc",null]', out
+
+
+def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "assignmentForTicket(" in src, "ticketRow never looks up who claimed the ticket"
+    assert re.search(r'href:\s*"#assign-"\s*\+\s*claimant\.id', src), (
+        "the claimed-ticket link must anchor to the assignment card's stable id"
+    )
+    assert "jumpToAssignment(" in src, "the link never opens/highlights the target card"
+    assert re.search(r"claimant\s*\?", src), "an unclaimed ticket must fall back to plain text, not a dead link"
+
+
+def test_ticket_row_gains_a_dedicated_dang_lam_gi_column():
+    src = _board_html_script()
+    assert "Đang làm gì" in src, "no 'Đang làm gì' header"
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", src, re.S)
+    assert body and "ticketCurrentAction(" in body.group(1), "ticketRow never renders the current-action cell"
+
+
+def test_assignment_card_has_a_stable_anchor_id():
+    card = _assignment_card_source()
+    assert re.search(r'id:\s*a\.id\s*!=\s*null\s*\?\s*"assign-"\s*\+\s*a\.id', card), (
+        "the card has no stable id an outside link can jump to"
+    )
+
+
+def test_jump_to_assignment_opens_the_closed_details_and_flashes_the_card():
+    src = _board_html_script()
+    fn = re.search(r"function jumpToAssignment\((.*?)\n\}", src, re.S)
+    assert fn, "jumpToAssignment() not found"
+    assert "details.open = true" in fn.group(1) or ".open = true" in fn.group(1), (
+        "jumping to a card must open its closed <details>"
+    )
+    assert "classList.add" in fn.group(1), "jumping to a card must flash it so the eye finds it"
+
+
+# ---------------------------------------------------------------------------
+# "Việc đã giao" as a grid of square tiles, not a full-width stack.
+# ---------------------------------------------------------------------------
+
+
+def _board_html_style():
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    blocks = re.findall(r"<style[^>]*>(.*?)</style>", html, re.S)
+    assert blocks, "board.html has no <style> block"
+    return "\n".join(blocks)
+
+
+def test_assignment_grid_uses_css_grid_not_a_full_width_stack():
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "display: grid" in rule.group(1)
+    assert "auto-fill" in rule.group(1), "the grid must collapse to fewer columns on a narrow board"
+
+
+def test_assignment_grid_does_not_stretch_every_tile_to_the_tallest_open_card():
+    """A card that auto-opens (needsAttention) is taller than its closed neighbours — grid's
+    default stretch would force every tile in that row to match it."""
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "align-items: start" in rule.group(1), (
+        "grid tiles must size to their own content (align-items: start), not stretch to match the row"
+    )
+
+
+def test_render_assignments_draws_open_cards_through_the_grid_container():
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    assert '"assignment-grid"' in body.group(1), "the open assignment cards are not drawn in the grid container"
+# ---------- the board's write path (bin/systemd/board_mirror_answers.py is the other half) ----------
+
+
+def _answers_collection():
+    """The one collection name the page writes and the pump's return path reads. Imported rather
+    than typed twice here: a rename on either side would otherwise leave the two halves pointing
+    at different collections, with a click that lands in storage nobody ever reads."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd"))
+    from board_mirror_answers import ANSWERS_COLLECTION
+
+    return ANSWERS_COLLECTION
+
+
+def test_board_writes_a_chosen_option_to_the_collection_the_return_path_reads():
+    script = _board_html_script()
+    assert re.search(
+        r'const ANSWERS_COLLECTION\s*=\s*"' + re.escape(_answers_collection()) + r'"', script
+    ), "board.html does not write to the collection board_mirror_answers.py reads back"
+    assert re.search(
+        r'view\.db\.doc\(ANSWERS_COLLECTION \+ "/" \+ esc\.id\)\.set\(', script
+    ), "the page has no write path — an option click records nothing"
+
+
+def test_board_never_writes_into_the_collections_the_pump_owns():
+    """`escalations` is board_state.py's write set: the next mirror run replays it, so anything
+    the page put there is overwritten — or deleted once the doc leaves board_state.py's output."""
+    script = _board_html_script()
+    for owned in ("escalations", "sessions", "tickets", "assignments", "meta"):
+        # Reading these is the whole point of the page (SOURCES does exactly that) — only a write
+        # verb chained onto one is the failure.
+        assert not re.search(
+            r'\.doc\("' + owned + r'/[^)]*\)\.(set|update|delete)\(', script
+        ), f"the page writes into the pump's own {owned}"
+    # Every document ref the page builds off the live db handle, so a second write anywhere fails
+    # this rather than quietly aiming at a collection the pump replays over.
+    refs = re.findall(r"view\.db\.doc\(([^)]*)\)", script)
+    assert refs == ['ANSWERS_COLLECTION + "/" + esc.id'], f"unexpected db document writes: {refs}"
+
+
+def test_board_only_offers_an_answer_control_on_a_record_still_waiting_for_a_human():
+    """The same gate board_mirror_answers.accepted_answers() applies. Offering a button any wider
+    than that gate is a control that looks live and is silently discarded on the way down —
+    `open` records are still the daemon's to decide, and one already carrying an answer may
+    already have been acted on."""
+    body = re.search(r"function answerControls\(([^)]*)\)\s*\{(.*?)\n\}", _board_html_script(), re.S)
+    assert body, "answerControls() not found"
+    guard = re.search(r"const answerable =([^;]*);", body.group(2))
+    assert guard, "answerControls() has no single answerable guard"
+    for required in ('esc.status === "needs_human"', "esc.answer == null", "options.length"):
+        assert required in guard.group(1), f"the answer gate does not check {required}"

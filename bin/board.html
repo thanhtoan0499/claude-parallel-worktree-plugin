@@ -244,6 +244,17 @@
   .esc-session { font-size: var(--fs-sm); color: var(--faint); }
   .esc-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
   .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
+  /* An answer button is the one control on this page that changes anything, so it reads as a
+     button rather than as a .chip the options used to be — same shape as .refresh-btn. */
+  .esc-answer {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .esc-answer:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .esc-answer:disabled { cursor: default; opacity: .6; }
+  .esc-answer-picked { border-color: var(--accent); color: var(--accent-strong); background: var(--surface-2); }
+  .esc-answer-error { color: var(--bad-ink); font-weight: 600; }
   /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
      question+options above it by a thin rule so the card stays scannable at a glance. */
   .esc-evidence { display: flex; flex-direction: column; gap: 3px; padding-top: 5px; border-top: 1px dashed var(--border-soft); }
@@ -317,9 +328,36 @@
   .a-card > details.collapsed-group { margin-top: 0; }
   .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
   .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
-  .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  /* The card's whole collapsed line, stacked top-to-bottom instead of wrapped left-to-right — the
+     shape a square grid tile needs. Title, status badges, then one fact per row, in the order the
+     CTO read them back to us: status, duration, token, ticket, steps, estimate. */
+  .a-card .a-card-body { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+  .a-card .a-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* Detail parked on title=: the owner/hạn/sau of a step not started yet, and the names of the
+     steps already behind us. Hover was the CTO's own suggestion, so the cursor and a dotted rule
+     have to say the hover is there — neither property moves a box, so nothing here can widen the
+     card on a narrow window. Touch, which has no hover, reads the same steps in the open card. */
+  .a-card .session-row .v[title], .a-card .session-row .v [title] {
+    cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 2px;
+  }
   .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
   .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
+
+  /* "Việc đã giao" as squares a manager can scan at a glance, not a full-width stack. Collapses to
+     one column on its own once the board is too narrow for a second — no media query needed.
+     align-items: start keeps a card that auto-opens (needsAttention) from stretching every other
+     tile in its row to match its height, which is grid's default. */
+  .assignment-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;
+    align-items: start;
+  }
+  @keyframes a-card-flash-kf {
+    0%, 100% { box-shadow: var(--shadow); }
+    25% { box-shadow: var(--shadow), 0 0 0 3px var(--accent); }
+  }
+  /* A link from the Backlog table jumps here and opens the card (jumpToAssignment()) — this is
+     the one flash of colour that says "you landed here", then gets out of the way on its own. */
+  .a-card-flash { animation: a-card-flash-kf 1.6s ease-out; }
 
   @media (max-width: 640px) {
     .app { padding: 14px 14px 44px; }
@@ -474,6 +512,7 @@ const KIND_GLOSS = {
   cost_anomaly: "chi phí bất thường",
   worktree_collision: "đụng worktree với phiên khác",
   diff_review: "cần review diff",
+  stuck_session: "phiên đứng im, không ai trả lời prompt",
 };
 
 /* ---------- tiny DOM builder ----------
@@ -547,11 +586,13 @@ function sessionLabel(sessionId) {
 }
 
 /* ---------- shared state ---------- */
-const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
+// `answers` is the only collection this page WRITES (see sendAnswer) — it is read back too, so a
+// card can say a choice is recorded but not yet in the manager's ledger.
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], answers: [], meta: null, db: null };
 // Extra bookkeeping alongside the required `view` shape above — which source has fired at least
 // once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
-view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
-view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
 // Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
 // why the last one failed.
 view.refresh = { busy: false, error: null };
@@ -581,6 +622,62 @@ function collapsedGroup(label, rows, openHint) {
 }
 
 /* ---------- escalations ---------- */
+// Answering, from the board itself. The chosen option is written to `escalation_answers/<id>` —
+// deliberately NOT into `escalations`, which is the pump's own write set: anything put there
+// would be overwritten by the next mirror run, or deleted outright once the document dropped out
+// of board_state.py's output. The pump reads this collection back on its next run and
+// bin/systemd/board_mirror_answers.py decides what may be appended to the manager's ledger, so
+// nothing here is the decision — this only records what the CTO picked. One pump cycle later the
+// escalation's own status flips to "answered" and the card moves to the resolved group below.
+const ANSWERS_COLLECTION = "escalation_answers";
+const answerState = new Map();   // escalation id -> "busy" while a write is in flight, else why it failed
+
+async function sendAnswer(esc, option) {
+  if (!view.db || answerState.get(esc.id) === "busy") return;
+  answerState.set(esc.id, "busy");
+  render();
+  try {
+    // set(), not update(): this is the whole document, and the first pick has nothing to merge
+    // into. A second pick before the pump runs simply replaces it — last click wins, one document.
+    await view.db.doc(ANSWERS_COLLECTION + "/" + esc.id).set({ answer: option, at: Date.now() });
+    answerState.delete(esc.id);
+  } catch (e) {
+    console.error("sendAnswer", e);
+    answerState.set(esc.id, "Không ghi được lựa chọn — thử lại, hoặc trả lời ở dashboard cục bộ (cổng 4400).");
+  }
+  render();
+}
+
+// Buttons only for a record genuinely waiting on a human, and only for options the worker itself
+// offered — board_mirror_answers.py accepts nothing else, so anything wider here would be a
+// control that silently does nothing. `open` is excluded on purpose: the manager daemon is still
+// deciding those, and answering one here would race it.
+function answerControls(esc, options) {
+  const answerable = view.db && esc.status === "needs_human" && esc.answer == null && options.length > 0;
+  if (!answerable) {
+    return [
+      options.length
+        ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
+        : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+      h("div", { class: "esc-session" }, "chưa trả lời được ở đây — dùng dashboard cục bộ (cổng 4400)."),
+    ];
+  }
+  const state = answerState.get(esc.id);
+  const picked = view.answers.find((a) => a.id === esc.id);
+  return [
+    h("div", { class: "esc-options" }, options.map((opt) => h("button", {
+      class: picked && picked.answer === opt ? "esc-answer esc-answer-picked" : "esc-answer",
+      type: "button",
+      disabled: state === "busy" ? "" : null,
+      onclick: () => sendAnswer(esc, opt),
+    }, opt))),
+    picked
+      ? h("div", { class: "esc-session" }, "đã chọn: " + picked.answer + " — chờ bơm ghi vào sổ escalation (≤ 1 chu kỳ).")
+      : null,
+    state && state !== "busy" ? h("div", { class: "esc-session esc-answer-error" }, state) : null,
+  ].filter(Boolean);
+}
+
 function escalationCard(esc) {
   const sev = esc.severity in SEVERITY_RANK ? esc.severity : "P2";
   const drift = esc.kind !== esc.kind_raw;
@@ -609,13 +706,7 @@ function escalationCard(esc) {
     ),
     h("div", { class: "esc-question" }, esc.question || "(không có nội dung câu hỏi)"),
     h("div", { class: "esc-session" }, "phiên: " + sessionLabel(esc.session)),
-    // Read-only mirror (step 1 of the migration): these are the options the worker offered, not
-    // buttons — nothing here can deliver an answer to the worker yet, so a clickable-looking
-    // button would be a dead end. The line below says where answering actually still works.
-    options.length
-      ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
-      : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
-    h("div", { class: "esc-session" }, "chỉ xem ở đây — trả lời tại dashboard cục bộ (cổng 4400)."),
+    answerControls(esc, options),
     // Supporting detail — why this reached a human, and what it touches — always last so the
     // question and options above stay the first thing scanned.
     esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
@@ -781,6 +872,27 @@ function looseSessions(assignments, sessions) {
 }
 
 /* ---------- assignments: the ledger, and the sessions working it ---------- */
+// What a plan step is doing right now — shared between the assignment card below and the
+// Backlog's "Đang làm gì" column (ticketCurrentAction(), near ticketRow()) so the two can never
+// describe the same running step differently. Same fallback-to-unknown rule sessionTile() uses
+// for a session state nobody has labelled.
+function stepState(s) {
+  return Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+}
+function planSteps(a) {
+  return Array.isArray(a.plan) ? a.plan : [];
+}
+function stepText(s) {
+  return s.step || "(bước không có mô tả)";
+}
+function doingSteps(a) {
+  return planSteps(a).filter((s) => stepState(s) === "doing");
+}
+// assignmentCard() below keeps its own copy of this exact sentence — a source-text test pins the
+// literal inside that function specifically, so this constant (used by ticketCurrentAction()
+// instead) is a second copy on purpose. Keep the two in sync by hand if the wording ever changes.
+const NO_RUNNER_TEXT = "chưa có bước nào đang chạy";
+
 function assignmentCard(a, sessions) {
   const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
   const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
@@ -791,7 +903,38 @@ function assignmentCard(a, sessions) {
   // transcript, and one derivation means the numbers and the step list under them cannot
   // disagree. `progress` is still published for the localhost dashboard but no longer read here:
   // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
-  const doneSteps = steps.filter((s) => s.state === "done").length;
+  // Bucketed once, rendered three times — the count on the collapsed line, the hover hint beside
+  // it and the rows inside the card are one derivation, so they cannot come to disagree. The
+  // normalisation is sessionTile()'s: a state nobody listed is "unknown" and gets said as such,
+  // never quietly folded into "chưa làm", because that would read as "not started yet".
+  const doneList = steps.filter((s) => stepState(s) === "done");
+  const doing = doingSteps(a);
+  const todo = steps.filter((s) => stepState(s) === "todo");
+  const unclear = steps.filter((s) => stepState(s) === "unknown");
+  const doneSteps = doneList.length;
+  // Who, by when, and after what. Real detail, but secondary to "where is this work" by
+  // definition — so it hangs off title= instead of sitting on the row: no JS, no layout, and the
+  // opened card still names every step for a touch device that can never hover.
+  const stepDetail = (s) => {
+    const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+    return [
+      s.owner ? "ai: " + s.owner : null,
+      s.eta ? "hạn: " + s.eta : null,
+      deps.length ? "sau: " + deps.join(", ") : null,
+    ].filter(Boolean).join(" · ") || null;
+  };
+  // Said, never inferred. A missing "đang làm" row would read as "nothing left to run" — the same
+  // mistake renderAssignments() refuses to make when the sessions listener is down.
+  const noRunner = "chưa có bước nào đang chạy";
+  const stepRow = (k, v, title) => h("div", { class: "session-row" },
+    h("span", { class: "k" }, k), h("span", { class: "v", title: title || null }, v));
+  // The answer the opened card gives, one hover away. The CTO asked for it on expand OR hover,
+  // and hover is the one a collapsed board gets for nothing.
+  const stepHint = !steps.length ? null
+    : (doing.length ? "đang làm: " + doing.map(stepText).join(" · ")
+      : todo.length || unclear.length ? noRunner
+      : "tất cả các bước đã xong")
+      + (todo.length ? " · còn lại " + todo.length + " bước" : "");
   const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
   const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
   // The sessions actually doing this work, and the ones among them that have stopped and are
@@ -818,29 +961,39 @@ function assignmentCard(a, sessions) {
     if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
   }
 
+  // No priority pill. It opened every card and was the least useful thing on it — the CTO does not
+  // triage by P0/P1/P2 ("tôi ko quan tâm P1 hay quan trọng mức thấp gì hết"), the manager does.
+  // `priority` itself is untouched: it still tints this card's left edge, still decides the order
+  // in renderAssignments(), and board_state.py still publishes it for the localhost dashboard.
+  // Reading order the CTO gave us back, verbatim: title, status, how long it has run, tokens
+  // (only when measured — "token chưa rõ" on every single tile said nothing), the ticket, which
+  // step is running, and the estimate (only when there is one to show).
   const summary = [
-    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
-    pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
-      known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
-    a.at_risk ? pill("pill-bad", "trễ hạn") : null,
-    a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
-    // The alarm the standalone sessions section used to carry, moved onto the one line that is
-    // visible whether or not this card is open.
-    attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null,
-    h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
-    // Which ticket this card is for, on the line visible whether or not the card is open — a
-    // reader scanning the collapsed board must not have to click in to find out.
-    refs.length ? h("span", { class: "session-refs" }, refs.map((id) => {
-      const url = ticketUrl(id);
-      return url
-        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
-        : h("span", { class: "chip" }, "AB#" + id);
-    })) : null,
-    h("span", { class: "a-facts mono" },
-      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
-      " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
-      " · token " + spendText,
-      " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
+    h("div", { class: "a-card-body" },
+      h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
+      h("div", { class: "a-badges" },
+        pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+          known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+        a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+        a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+        // The alarm the standalone sessions section used to carry, moved onto the one line that is
+        // visible whether or not this card is open.
+        attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null),
+      stepRow("chạy", durationText(a.elapsed_seconds) || "chưa rõ"),
+      spend != null ? stepRow("token", spendText) : null,
+      // Which ticket this card is for, on the line visible whether or not the card is open — a
+      // reader scanning the collapsed board must not have to click in to find out.
+      refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+        const url = ticketUrl(id);
+        return url
+          ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+          : h("span", { class: "chip" }, "AB#" + id);
+      })) : null,
+      steps.length
+        ? h("div", { class: "session-row" }, h("span", { class: "k" }, "bước"),
+            h("span", { class: "v", title: stepHint }, doneSteps + "/" + steps.length + " bước"))
+        : stepRow("bước", "chưa có kế hoạch"),
+      etaParts.length ? stepRow("xong", etaParts.join(" · ")) : null),
   ];
 
   // Everything below only exists once the card is opened. The note is a paragraph of prose and
@@ -853,19 +1006,29 @@ function assignmentCard(a, sessions) {
       h("span", { class: "v" }, a.deadline || "—")),
     cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
       h("span", { class: "v" }, cacheText)) : null,
+    // Where the work is, not a transcript of how it got there. One row per bucket instead of one
+    // per step: the finished ones collapse to a count (their names are on the hover — nobody needs
+    // to re-read what is already behind them), the running one is spelled out with the owner and
+    // date a manager would actually act on, and what is left is named so "what is left" is legible
+    // without reading a row each. A row per step was this card's previous shape and the verdict on
+    // it was "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì".
     steps.length
-      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
-          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
-          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
-          const extra = [
-            s.owner ? "ai: " + s.owner : null,
-            s.eta ? "hạn: " + s.eta : null,
-            deps.length ? "sau: " + deps.join(", ") : null,
-          ].filter(Boolean).join(" · ");
-          return h("div", { class: "session-row" },
-            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
-            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
-        }))
+      ? h("div", { class: "esc-evidence" },
+          doneSteps
+            ? stepRow("đã xong", doneSteps + "/" + steps.length + " bước",
+                doneList.map(stepText).join(" · "))
+            : null,
+          doing.length
+            ? stepRow("đang làm", doing.map((s) => {
+                const d = stepDetail(s);
+                return stepText(s) + (d ? " (" + d + ")" : "");
+              }).join(" · "))
+            : (todo.length || unclear.length ? stepRow("đang làm", noRunner) : null),
+          todo.length
+            ? stepRow("còn lại", todo.map((s, i) =>
+                h("span", { title: stepDetail(s) }, (i ? " · " : "") + stepText(s))))
+            : null,
+          unclear.length ? stepRow("không rõ", unclear.map(stepText).join(" · ")) : null)
       : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
     a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
   ];
@@ -875,7 +1038,7 @@ function assignmentCard(a, sessions) {
   // exactly the rule .esc-card.sev-* already carries. Condensed by default is the whole point —
   // the single exception is a card holding a worker that has stopped and is waiting for a person.
   // That one opens itself, because a click is precisely what nobody makes before it matters.
-  return h("div", { class: "esc-card a-card sev-" + sev },
+  return h("div", { class: "esc-card a-card sev-" + sev, id: a.id != null ? "assign-" + a.id : null },
     collapsedGroup(summary, detail, attention.length > 0));
 }
 
@@ -914,7 +1077,7 @@ function renderAssignments() {
   cards.sort((x, y) => Number(y.mine.some(needsAttention)) - Number(x.mine.some(needsAttention)));
 
   if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
-  else section.append(h("div", { class: "esc-list" }, cards.map((c) => assignmentCard(c.a, c.mine))));
+  else section.append(h("div", { class: "assignment-grid" }, cards.map((c) => assignmentCard(c.a, c.mine))));
 
   // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
   // them, so dropping them here would throw away the record it went to the trouble of publishing.
@@ -923,7 +1086,7 @@ function renderAssignments() {
   // below instead, which opens itself.
   if (closed.length) {
     section.append(collapsedGroup(closed.length + " việc đã đóng",
-      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
+      [h("div", { class: "assignment-grid" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
   }
 
   // Everything no open assignment claims — an ad-hoc terminal, or a worker whose assignment was
@@ -942,6 +1105,47 @@ function renderAssignments() {
 }
 
 /* ---------- tickets ---------- */
+// Which assignment, if any, has claimed a ticket — the same ado_refs join needsAttention()'s
+// sibling helpers already run for sessions, aimed at tickets instead. Pure and parameterised so
+// it runs outside the page too (see test_board_state.py's node-backed tests).
+function assignmentForTicket(ticketId, assignments) {
+  return assignments.find((a) => Array.isArray(a.ado_refs) &&
+    a.ado_refs.some((r) => String(r) === String(ticketId)));
+}
+
+// "Đang làm gì": the running step of whoever holds the ticket, or the next move when nobody
+// does. The running-step half reads doingSteps()/stepText() — the exact derivation the assignment
+// card itself uses — so the two can never describe the same step differently. The no-claimant
+// half only restates what the board already computed elsewhere (t.state, t.pr.state,
+// t.derived_status) — no new source of truth, and "suy không ra" stays null for the caller to
+// print as "—".
+function ticketCurrentAction(t, assignments) {
+  const claimant = assignmentForTicket(t.id, assignments);
+  if (claimant) {
+    const steps = planSteps(claimant);
+    if (!steps.length) return "chưa ai chia bước";
+    const doing = doingSteps(claimant);
+    return doing.length ? doing.map(stepText).join(" · ") : NO_RUNNER_TEXT;
+  }
+  if (t.pr && t.pr.state === "OPEN") return "chờ review / merge PR";
+  if (t.state === "Blocked") return "đang bị chặn — chờ người xử lý";
+  if (t.derived_status === "unclaimed") return "cần giao việc";
+  return null;
+}
+
+// A Backlog row's "Chờ ai" cell jumps here: opens the assignment card's closed <details> and
+// gives it one flash so the eye catches where it landed — a link to still-closed content is
+// useless.
+function jumpToAssignment(id) {
+  const el = document.getElementById("assign-" + id);
+  if (!el) return;
+  const details = el.querySelector("details.collapsed-group");
+  if (details) details.open = true;
+  el.classList.remove("a-card-flash");
+  void el.offsetWidth; // restart the animation on a second jump to the same card
+  el.classList.add("a-card-flash");
+}
+
 function ticketStateTone(state) {
   if (state === "Blocked") return "pill-bad";
   if (state === "Active") return "pill-accent";
@@ -960,6 +1164,13 @@ function ticketPrChip(pr) {
 function ticketRow(t, opts) {
   opts = opts || {};
   const href = safeHref(t.url);
+  // The one place a Backlog row jumps to the card actually working it — assignmentForTicket()
+  // is the join, assignmentCard()'s "assign-"+id is the anchor it jumps to.
+  const claimant = assignmentForTicket(t.id, view.assignments);
+  const waitingPill = t.derived_status
+    ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
+           DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
+    : "—";
   const cells = [
     h("td", { class: "num" }, href
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
@@ -970,10 +1181,15 @@ function ticketRow(t, opts) {
     // the thing worth seeing. A null derived status means there is genuinely nothing left to
     // chase (a closed ticket whose PR merged), never "unknown".
     h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
-    h("td", {}, t.derived_status
-      ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
-             DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
-      : "—"),
+    // A live claim turns the pill into a jump to that card — a more specific answer to the exact
+    // question this column already asks. No claim, no link: a dead href is worse than plain text.
+    h("td", {}, claimant
+      ? h("a", {
+          href: "#assign-" + claimant.id, style: "text-decoration:none;",
+          title: "Xem card đang chạy việc này", onclick: () => jumpToAssignment(claimant.id),
+        }, waitingPill)
+      : waitingPill),
+    h("td", {}, ticketCurrentAction(t, view.assignments) || "—"),
     h("td", {}, t.sprint || "—"),
     h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
@@ -987,6 +1203,8 @@ function ticketTable(rows, opts) {
     h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
     h("th", { title: "Việc này đang chờ ai ra tay — bảng tự suy ra từ PR, escalation và sổ giao việc" },
       "Chờ ai"),
+    h("th", { title: "Bước đang chạy của người đang cầm vé — hoặc việc cần làm tiếp nếu chưa ai nhận" },
+      "Đang làm gì"),
     h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
   ];
   if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
@@ -1218,6 +1436,9 @@ const SOURCES = [
   { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
   { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
   { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  // The page's own writes, read back: an answer stays here until the pump appends it to the
+  // ledger, and that round trip is the only thing a card can show to prove a click landed.
+  { key: "answers", ref: (db) => db.collection(ANSWERS_COLLECTION), apply: (s) => { view.answers = docsOf(s); } },
   {
     key: "meta",
     ref: (db) => db.doc("meta/status"),
@@ -1264,10 +1485,24 @@ async function refresh() {
 }
 
 /* ---------- render ---------- */
+// Backlog leads once nothing needs a person right now — but "Cần quyết định" must never sit
+// below it while something is actually open, so a P0 is never a scroll away. Not knowing yet
+// (still loading, or the listener errored) keeps the old escalations-first order rather than
+// guessing the backlog is safe to promote.
+function escalationsGoFirst(loaded, errored, escalations) {
+  if (!loaded || errored) return true;
+  return escalations.some((e) => !RESOLVED_STATUSES.has(e.status));
+}
+
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
-  if (board) board.replaceChildren(
-    renderEscalations(), renderAssignments(), renderTickets());
+  if (board) {
+    if (escalationsGoFirst(view.loaded.escalations, view.errors.escalations, view.escalations)) {
+      board.replaceChildren(renderEscalations(), renderTickets(), renderAssignments());
+    } else {
+      board.replaceChildren(renderTickets(), renderAssignments(), renderEscalations());
+    }
+  }
   renderSummary();
   renderFreshness();
   renderRefresh();

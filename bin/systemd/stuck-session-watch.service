@@ -1,0 +1,16 @@
+[Unit]
+Description=File any frozen worker session into the manager's escalation queue
+
+[Service]
+Type=oneshot
+# The same operator config board-mirror already uses, for the one variable this needs:
+# PWT_REPO_ROOT, which says whose .claude/worktrees/.parallel-registry.json to join sessions
+# against. Nothing else in that file applies here — this unit runs no `claude -p` session, only
+# `claude agents --json`, so it needs no token and no CLAUDE_CODE_ENTRYPOINT.
+EnvironmentFile=%h/.config/board-mirror/env
+# A symlink to the checked-out bin/, not a copy — see README.md. Keeping the path fixed under
+# ~/.config means the unit never hardcodes where this repo happens to be checked out.
+ExecStart=/usr/bin/env python3 %h/.config/board-mirror/stuck_sessions.py
+# A whole scan is one `claude agents --json` plus a few file reads — under a second in practice.
+# 60s is generous and still well clear of the 5-minute cadence.
+TimeoutStartSec=60

@@ -19,7 +19,7 @@
 #
 # Usage:
 #   parallel-task.sh start    <task-name> <native|docker> [base-ref] [--ticket <id> ...]
-#   parallel-task.sh dispatch <task-name> <prompt> [--model <model>] [--effort low|medium|high|xhigh|max]
+#   parallel-task.sh dispatch <task-name> <prompt> [--worktree <path>] [--model <model>] [--effort low|medium|high|xhigh|max]
 #   parallel-task.sh list     [--json]
 #   parallel-task.sh stop     <task-name>
 #   parallel-task.sh rm       <task-name> [--force]
@@ -62,6 +62,44 @@ reg_merge_entry() {
   tmp="$(mktemp "${TMPDIR:-/tmp}/parallel-task-registry.XXXXXX.json")"
   jq --arg k "$1" --argjson v "$2" '.[$k] += $v' "$REGISTRY" > "$tmp"
   mv "$tmp" "$REGISTRY"
+}
+
+task_is_adopted() {
+  # True for a row this script recorded but did not provision — see adopt_entry. `stop` and `rm`
+  # ask before tearing anything down, because neither the dev stack nor the worktree is theirs.
+  [[ "$(reg_get --arg k "$1" '.[$k].adopted // false')" == "true" ]]
+}
+
+adopt_entry() {
+  # adopt_entry <worktree-path> — the registry row for a worktree this script did not create.
+  #
+  # Every field is read off the worktree, never guessed. `mode: adopted` with null num/ports says
+  # plainly that no dev stack was provisioned here, so `list` reports it stopped (true — there is
+  # nothing to run) and `stop`/`rm` know to keep their hands off. `ado_ids: []` because every
+  # other row has the key and consumers walk it.
+  local path branch
+  path="$(cd "$1" && pwd)"
+  # symbolic-ref, not `rev-parse --abbrev-ref`: that returns the literal string "HEAD" both for a
+  # detached worktree and for a branch with no commit yet, and "HEAD" recorded as a branch name is
+  # worse than null. This prints the branch or fails, and a failure means null.
+  branch="$(git -C "$path" symbolic-ref --short HEAD 2>/dev/null || true)"
+  jq -n --arg branch "$branch" --arg path "$path" \
+    '{branch: (if $branch == "" then null else $branch end), path: $path,
+      mode: "adopted", num: null, ports: null, ado_ids: [], adopted: true}'
+}
+
+dispatch_worktree() {
+  # dispatch_worktree <task-name> <--worktree value, may be empty> — print the worktree to adopt.
+  #
+  # Non-zero when there is nothing to adopt, which is the only case left where dispatch refuses.
+  local task="$1" explicit="${2:-}"
+  if [[ -n "$explicit" ]]; then
+    [[ -d "$explicit" ]] || { echo "error: --worktree '$explicit' is not a directory" >&2; return 1; }
+    ( cd "$explicit" && pwd )
+    return 0
+  fi
+  [[ -d "$WORKTREES_DIR/$task" ]] || return 1
+  echo "$WORKTREES_DIR/$task"
 }
 
 # --- port / slot liveness checks ---------------------------------------------
@@ -141,10 +179,13 @@ parse_start_args() {
 # Globals rather than a printed tab-separated line: a prompt is multi-line, and a newline inside a
 # tab-delimited return would break the caller's read.
 parse_dispatch_args() {
-  DISPATCH_MODEL=""; DISPATCH_EFFORT=""; DISPATCH_PROMPT=""
+  DISPATCH_MODEL=""; DISPATCH_EFFORT=""; DISPATCH_PROMPT=""; DISPATCH_WORKTREE=""
   local -a positional=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --worktree)
+        [[ $# -ge 2 ]] || { echo "error: --worktree requires a value" >&2; return 1; }
+        DISPATCH_WORKTREE="$2"; shift 2 ;;
       --model)
         [[ $# -ge 2 ]] || { echo "error: --model requires a value" >&2; return 1; }
         DISPATCH_MODEL="$2"; shift 2 ;;
@@ -174,7 +215,11 @@ cmd_start() {
   [[ "$task" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "error: task-name must be kebab-case (got: '$task')" >&2; exit 1; }
   [[ "$mode" == "native" || "$mode" == "docker" ]] || { echo "error: mode must be 'native' or 'docker' (got: '$mode')" >&2; exit 1; }
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "false" ]] || { echo "error: task '$task' already registered (see: $0 list)" >&2; exit 1; }
-  [[ -e "$WORKTREES_DIR/$task" ]] && { echo "error: $WORKTREES_DIR/$task already exists" >&2; exit 1; }
+  [[ -e "$WORKTREES_DIR/$task" ]] && {
+    echo "error: $WORKTREES_DIR/$task already exists" >&2
+    echo "       to run a worker in it instead: $0 dispatch $task \"<brief>\"" >&2
+    exit 1
+  }
 
   local branch="feature/${task}"
   local wt_path="$WORKTREES_DIR/$task"
@@ -317,6 +362,13 @@ cmd_stop() {
     claude stop "$short_id" || true
   fi
 
+  if task_is_adopted "$task"; then
+    # The session was ours to stop; the worktree and whatever runs in it were not. Tearing down a
+    # stack this script never started would take out whichever task actually provisioned it.
+    echo ">> $task stopped (adopted worktree — no dev stack of ours to bring down)"
+    return 0
+  fi
+
   local mode num path
   mode="$(reg_get --arg k "$task" '.[$k].mode')"
   num="$(reg_get --arg k "$task" '.[$k].num')"
@@ -336,6 +388,16 @@ cmd_rm() {
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task'" >&2; exit 1; }
   local path
   path="$(reg_get --arg k "$task" '.[$k].path')"
+
+  if task_is_adopted "$task"; then
+    # Deleting a worktree this script did not create is not ours to do — and an adopted row can
+    # point at a worktree another task owns, so `git worktree remove` here would take out that
+    # task's work. Drop the row and stop; the worktree stays exactly as it was.
+    cmd_stop "$task" || true
+    reg_del_entry "$task"
+    echo ">> $task unregistered. Adopted worktree $path left alone — remove it yourself if you own it."
+    return 0
+  fi
 
   cmd_stop "$task" || true
 
@@ -358,9 +420,34 @@ cmd_dispatch() {
   local task="$1"; shift
   parse_dispatch_args "$@" || usage
   local prompt="$DISPATCH_PROMPT"
-  [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task' (see: $0 list)" >&2; exit 1; }
+  # A task with no row is not a refusal any more, it is an adoption. `start` will not touch a
+  # worktree that already exists and `dispatch` used to insist on a row, so there was no supported
+  # way to launch a worker into an existing worktree — and going around both with a bare
+  # `claude --bg` records nothing. An unrecorded session is indistinguishable from somebody's own
+  # terminal, so every consumer that asks "did we dispatch this?" (board_state.session_docs's
+  # `managed`, manager_daemon's worker-finished wakes, the stuck-session watch) answers no about a
+  # real worker. Three live workers sat outside the registry on 2026-09-09 for exactly this reason.
   local wt_path
-  wt_path="$(reg_get --arg k "$task" '.[$k].path')"
+  if [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]]; then
+    wt_path="$(reg_get --arg k "$task" '.[$k].path')"
+    if [[ -n "$DISPATCH_WORKTREE" ]]; then
+      local given
+      given="$( (cd "$DISPATCH_WORKTREE" 2>/dev/null && pwd) || echo "$DISPATCH_WORKTREE" )"
+      [[ "$given" == "$wt_path" ]] || {
+        echo "error: '$task' is already registered at $wt_path, but --worktree says $given" >&2
+        echo "       dispatch under a different task name to run a second worker in that worktree" >&2
+        exit 1
+      }
+    fi
+  elif wt_path="$(dispatch_worktree "$task" "$DISPATCH_WORKTREE")"; then
+    reg_set_entry "$task" "$(adopt_entry "$wt_path")"
+    echo ">> adopted existing worktree $wt_path as task '$task' (no dev stack provisioned by us)"
+  else
+    echo "error: unknown task '$task' and no worktree to adopt (see: $0 list)" >&2
+    echo "       $WORKTREES_DIR/$task does not exist — pass --worktree <path> to dispatch into" >&2
+    echo "       a worktree under another name, or run: $0 start $task <native|docker>" >&2
+    exit 1
+  fi
 
   local -a launch=(claude --bg -n "$task")
   if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(--model "$DISPATCH_MODEL"); fi

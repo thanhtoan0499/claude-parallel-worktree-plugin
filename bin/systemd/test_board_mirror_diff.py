@@ -2,9 +2,25 @@
 """assert-based checks for board_mirror_diff, the incremental-write/delete transform behind
 run-board-mirror.sh."""
 
-from board_mirror_diff import apply_batch, chunk_writes, diff_writes
+from board_mirror_diff import apply_batch, chunk_writes, diff_writes, stamp_heartbeat
 
-META = {"op": "set", "collection": "meta", "doc_id": "status", "data": {"written_at": 2}}
+# The real meta/status always carries last_ado_sweep (see board_state.meta_status), and
+# diff_writes now reads it to tell "the ADO sweep found nothing" from "the ADO sweep did not
+# run". A fixture without the field would silently exercise the did-not-run path in every test
+# below, so it is stated here rather than left to default.
+META = {
+    "op": "set",
+    "collection": "meta",
+    "doc_id": "status",
+    "data": {"written_at": 2, "last_ado_sweep": 2},
+}
+# Same document from a run whose ADO reader raised and was caught by board_state._safe().
+META_SWEEP_FAILED = {
+    "op": "set",
+    "collection": "meta",
+    "doc_id": "status",
+    "data": {"written_at": 2, "last_ado_sweep": None},
+}
 
 
 def _set(collection, doc_id, data):
@@ -59,7 +75,7 @@ def test_apply_batch_keys_by_collection_slash_doc_id_and_keeps_only_data():
 
     assert apply_batch({}, writes) == {
         "sessions/a": {"state": "running"},
-        "meta/status": {"written_at": 2},
+        "meta/status": META["data"],
     }
 
 
@@ -206,3 +222,129 @@ def test_apply_batch_refuses_to_record_a_document_that_cannot_exist():
     snapshot = apply_batch({}, [_set("sessions", BAD, {"state": "running"}), _set("sessions", "ok", {"n": 1})])
 
     assert set(snapshot) == {"sessions/ok"}
+
+
+# --- the heartbeat rides batch 1 so a partial run still proves the pump is alive ----------------
+
+PUMP = {"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": 1}}
+
+
+def test_chunk_stamps_the_backlog_size_onto_the_heartbeat_in_the_first_batch():
+    # Only the chunker knows how many batches there are, and the board needs "still N to go" to
+    # tell a pump that is draining from one that has stopped. One number, because the heartbeat
+    # rides batch 1: all it can honestly report is how much this run found to do.
+    entries = [PUMP] + [_set("tickets", str(i), {"n": i}) for i in range(120)] + [META]
+
+    batches = chunk_writes(entries, 50)
+    stamped = stamp_heartbeat(batches)
+
+    assert stamped[0][0]["data"] == {"ran_at": 1, "batches_pending": 3}
+    # Nothing else moved: the rest of batch 1 and every later batch are untouched.
+    assert stamped[0][1:] == batches[0][1:]
+    assert stamped[1:] == batches[1:]
+
+
+def test_stamping_is_a_no_op_when_there_is_no_heartbeat_to_stamp():
+    batches = chunk_writes([_set("tickets", "1", {"n": 1}), META], 50)
+
+    assert stamp_heartbeat(batches) == batches
+    assert stamp_heartbeat([]) == []
+
+
+def test_the_heartbeat_leads_the_diff_so_it_always_lands_in_the_first_batch():
+    # It has to survive diffing: it is a real document board_state emits, so an unchanged-doc
+    # filter must not drop it, and it must stay ahead of the changed rows and the deletes.
+    previous = {"meta/pump": {"ran_at": 0}, "tickets/gone": {"n": 0}, "tickets/same": {"n": 1}}
+    writes = [PUMP, _set("tickets", "same", {"n": 1}), _set("tickets", "new", {"n": 2}), META]
+
+    result = diff_writes(previous, writes)
+
+    assert result[0] == PUMP, f"heartbeat is not first: {[r['doc_id'] for r in result]}"
+    assert result[-1] == META
+def test_a_failed_ado_sweep_does_not_delete_the_tickets_it_could_not_read():
+    """The 2026-09-09 regression: `az` failed, board_state published zero tickets, and every
+    previously-known ticket row was reconciled away — 140 deletes on the CTO's board from one
+    failed subprocess. An absent ticket collection means "not reported" when last_ado_sweep is
+    null; only a sweep that actually ran may retire a ticket."""
+    previous = apply_batch({}, [
+        _set("tickets", "7763", {"state": "Active"}),
+        _set("tickets", "8318", {"state": "Active"}),
+        _set("sessions", "a", {"state": "running"}),
+    ])
+    # The session ended for real, and the sweep did not run: only the session may be deleted.
+    writes = [META_SWEEP_FAILED]
+
+    result = diff_writes(previous, writes)
+
+    assert result == [{"op": "delete", "collection": "sessions", "doc_id": "a"}, META_SWEEP_FAILED]
+
+
+def test_a_successful_empty_sweep_still_retires_its_tickets():
+    """The other half, and why this is keyed to last_ado_sweep rather than "the collection is
+    empty": a sweep that ran and legitimately matched nothing must still clear the board."""
+    previous = apply_batch({}, [_set("tickets", "7763", {"state": "Closed"})])
+
+    result = diff_writes(previous, [META])
+
+    assert result == [{"op": "delete", "collection": "tickets", "doc_id": "7763"}, META]
+
+
+def test_a_failed_sweep_still_publishes_every_other_collection():
+    """A failed ADO read must not freeze the rest of the board — sessions and assignments are
+    independent sources and their changes still go out."""
+    previous = apply_batch({}, [
+        _set("tickets", "7763", {"state": "Active"}),
+        _set("assignments", "a1", {"status": "assigned"}),
+    ])
+    writes = [_set("assignments", "a1", {"status": "done"}), META_SWEEP_FAILED]
+
+    result = diff_writes(previous, writes)
+
+    assert result == [writes[0], META_SWEEP_FAILED]
+
+
+def _cycle(snapshot, writes, land_batches=None, limit=50):
+    """One pump run: diff -> chunk -> apply, recording only the batches that landed.
+    `land_batches=None` means every batch landed; an int means the run died after that many."""
+    batches = chunk_writes(diff_writes(dict(snapshot), writes), limit)
+    for batch in batches[: land_batches if land_batches is not None else len(batches)]:
+        snapshot = apply_batch(snapshot, batch)
+    return snapshot, len(batches)
+
+
+def test_an_interrupted_run_then_a_complete_one_leaves_the_snapshot_exactly_whole():
+    """The other half of "no more, no less". The suite proved the snapshot never records a
+    document that was not written; nothing proved it never FORGETS one that was. That half is
+    what is running in production: board_state emits 54 sessions, the live snapshot holds 0, so
+    every run re-sends all 54 and — because the pump only deletes what it remembers — no session
+    orphan can ever be cleaned up again.
+    """
+    writes = [_set("sessions", f"s{i}", {"n": i}) for i in range(60)]
+    writes += [_set("tickets", f"t{i}", {"n": i}) for i in range(60)]
+    writes += [META]
+
+    # Run 1 dies after one batch. Run 2 (and any further runs) go to completion.
+    snapshot, _ = _cycle({}, writes, land_batches=1)
+    snapshot, _ = _cycle(snapshot, writes)
+
+    emitted = {f"{w['collection']}/{w['doc_id']}" for w in writes}
+    assert set(snapshot) == emitted, (
+        f"snapshot must hold exactly what board_state emitted; "
+        f"missing={sorted(emitted - set(snapshot))} extra={sorted(set(snapshot) - emitted)}"
+    )
+
+
+def test_a_run_interrupted_at_every_batch_boundary_still_converges():
+    """Same property, driven from every possible interruption point rather than one — the real
+    pump is cut at whatever batch its 240s budget happens to land on."""
+    writes = [_set("sessions", f"s{i}", {"n": i}) for i in range(60)]
+    writes += [_set("assignments", f"a{i}", {"n": i}) for i in range(60)]
+    writes += [META]
+    emitted = {f"{w['collection']}/{w['doc_id']}" for w in writes}
+
+    _, total = _cycle({}, writes)
+    for cut in range(total + 1):
+        snapshot, _ = _cycle({}, writes, land_batches=cut)
+        for _ in range(total + 2):  # keep firing until it drains
+            snapshot, remaining = _cycle(snapshot, writes)
+        assert set(snapshot) == emitted, f"cut after {cut} batches never converged"

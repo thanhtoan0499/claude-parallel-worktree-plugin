@@ -380,15 +380,30 @@ def sum_usage(records) -> dict:
     return totals
 
 
+def session_transcripts(session_id: str, projects_root: str = PROJECTS_ROOT) -> list[str]:
+    """Every transcript file for one session id, newest-mtime last, or [] when there is none.
+
+    A worktree session's transcript lives under a project directory named after the WORKTREE
+    path, not the repo root, so the lookup is by session id across every project directory
+    rather than by re-deriving that encoding here.
+    """
+    return sorted(glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl")), key=_mtime)
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def read_session_usage(session_id: str, projects_root: str = PROJECTS_ROOT) -> dict | None:
     """Totals for one session's transcript, or None when there is no transcript to read.
 
     None, never a zeroed dict: "no file" and "a file that recorded nothing" are different facts,
-    and only one of them may reach the page as a number. A worktree session's transcript lives
-    under a project directory named after the WORKTREE path, not the repo root, so the lookup is
-    by session id across every project directory rather than by re-deriving that encoding here.
+    and only one of them may reach the page as a number.
     """
-    matches = glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl"))
+    matches = session_transcripts(session_id, projects_root)
     if not matches:
         return None
     records = []
@@ -1034,7 +1049,15 @@ def build_writes(
     straight through without reshaping — the transform is testable here, and the session stays
     a thin courier.
     """
-    writes = []
+    # First, always: proof the pump is alive, and nothing else. It carries no "as of" clock, so
+    # it can never be mistaken for the completeness claim meta/status makes at the other end of
+    # the run. Being first means it rides batch 1, so it lands even on a run that stops part-way
+    # through a backlog — which, since the refresh started checkpointing per batch, is every run
+    # during a drain. meta/status stayed the board's only clock through that change and froze for
+    # the whole drain, so a board with data visibly flowing rendered as hours stale and tripped
+    # the staleness alarm sized off this same cadence. See board_mirror_diff.stamp_heartbeat()
+    # for the batch counts the chunker adds, and bin/systemd/README.md for the field contract.
+    writes = [{"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": now}}]
     # Built before the tickets, because the tickets' derived status is a join over both: which
     # tickets an assignment owns, and which are stuck behind an escalation nobody has answered.
     # Reusing the folded documents rather than re-walking the raw ledgers is what keeps the
