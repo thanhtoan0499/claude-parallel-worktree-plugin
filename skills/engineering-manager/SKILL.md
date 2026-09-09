@@ -117,6 +117,64 @@ sessions, gets no worker-finished wake, and — the one that bites — is invisi
 stuck-session watch, so when it freezes on a prompt nobody will answer, nothing notices. Three
 workers sat outside the registry for exactly this reason on 2026-09-09, and all three froze.
 
+**The session name must equal the worktree task name, exactly.** The board joins a live session to
+its branch and its ticket by name — `board_state.build(name, agent, reg)` looks up `registry[name]`.
+A worktree provisioned as `t8309-confirm-tool` and a session dispatched as `t8309d` are two halves
+that never meet: the session document comes out with `ado_refs: []`, `branch: null`,
+`managed: false`, and the assignment grid draws a card with no ticket, no branch and no elapsed
+time. Nothing errors. The board just goes quiet, which looks exactly like no work running. A
+re-dispatch is the trap — resist appending `b`, `c`, `d` to the name.
+
+### Dispatch interactive, not background
+
+A `--bg` worker is write-only and one-shot, and both halves of that hurt.
+
+It **cannot be messaged**. `SendMessage` to one returns "session not found", the same dead end
+`--resume` already is. So a brief cannot be extended once work starts, a worker heading the wrong
+way cannot be corrected, and — the one that actually costs you — a finished worker cannot be asked
+a follow-up. The only move left is kill and re-dispatch from scratch, throwing away everything it
+learned. That happened three times in one afternoon on 2026-09-09.
+
+Every prompt it hits is also **invisible**. It stalls, and waiting looks exactly like working. Five
+stalls that day: `Monitor`, the browser tools twice, a `git push`, and the trust-folder dialog a
+fresh worktree raises before any work begins ("This folder pre-approves N tool permissions… Yes, I
+trust this folder"). In an interactive session that dialog is one keypress.
+
+So dispatch into a persistent interactive session instead:
+
+    cmew new <task-name> <worktree-dir> -e <level>      # tmux session cc-<task-name>
+    tmux send-keys -t cc-<task-name> Down ; tmux send-keys -t cc-<task-name> Enter   # trust dialog
+    tmux send-keys -t cc-<task-name> "Read BRIEF.md in this worktree and do exactly what it says …"
+    tmux send-keys -t cc-<task-name> Enter
+
+Write the brief to `BRIEF.md` inside the worktree and point at it with one short line — piping a
+long brief through `send-keys` is an escaping trap, and a backtick in a double-quoted string gets
+executed by the shell rather than delivered. Tell the worker to leave its report as its final
+message **and stay alive**. Afterwards reach it with `SendMessage`, using the sessionId from
+`ListAgents` — not the short id `claude attach` prints, which `SendMessage` will not resolve.
+
+`parallel-task.sh dispatch` still launches with `claude --bg` internally, so it inherits every
+problem above; prefer the interactive route until that changes.
+
+### Grant the permissions the work actually needs
+
+Read your own brief back and list the tools it forces. Tests mean Bash. Live verification means a
+browser. Screenshots mean a Write outside the workspace. Then grant broadly and control narrowly —
+**enumerating tools fails on the one you did not predict, and you cannot predict them**, because a
+capable worker reaches for tools you would not have chosen.
+
+- `acceptEdits` covers file edits and nothing else. Any brief that runs something needs more.
+- Wildcard every tool — `Bash(*)`, the file and search tools, `Monitor(*)`, `ToolSearch(*)`,
+  `Task(*)`, `TodoWrite(*)`, `SlashCommand(*)`, `Skill(*)` — and put the control in `deny`:
+  `git push origin main`, `git push --force`, `gh pr create`, `gh pr merge`, `rm -rf`.
+- **MCP rules do not accept wildcards.** `mcp__*` and `mcp__server__*` match nothing at all; the
+  only valid forms are the bare server name (`mcp__playwright`) or an exact `mcp__server__tool`.
+  The tell that no rule is matching: one tool of a server succeeds and the next one prompts.
+- `bypassPermissions` is unavailable to a dispatched session until a human has run
+  `claude --dangerously-skip-permissions` once interactively. Do not plan on it.
+- Settings are per-directory. A fresh worktree inherits nothing — copy
+  `.claude/settings.local.json` in when provisioning, and any skill the brief depends on.
+
 An adopted row records the worktree and its branch but claims no dev stack, so `stop` leaves the
 stack alone and `rm` unregisters the task without deleting a worktree it did not create.
 
@@ -206,6 +264,25 @@ a deploy. A deploy to dev is not a deploy to the environment QC tests. Moving a 
 QC-ready state before the build has reached that environment sends QC at the old build, and they
 report the bug as still present. Check the deploy, then set the state; when a deployment is
 waiting on a human approval, say so and name what is waiting.
+
+**Set state from evidence, never from intent.** A ticket's state is a claim about reality that
+other people plan around, so derive it from something checkable — an open PR, a live worker, a named
+person you are waiting on. "I plan to start this" is not evidence, and neither is "I dispatched a
+worker an hour ago" until you have checked that worker is still alive. Before writing any state,
+name the evidence out loud; if you cannot, the state is New. On 2026-09-09 the CTO read back ten
+tickets and every one was wrong in the same family of ways — `Active` used as a private to-do
+marker, a Resolved state that existed and was never used, `Blocked` written with the reason
+recorded nowhere a machine could read it. That was one habit showing up ten times, not ten
+mistakes.
+
+**A blocked ticket must record who is blocking and on what.** "Blocked" alone describes your own
+bookkeeping and forces the reader to open the ticket and read comments for the one thing they came
+for. Put it where the board can render it: an assignment-ledger record whose note starts
+`CHẶN BỞI: <who> — <what>` and whose `ado_refs` carries the ticket. Tracker tags may not be
+writable — the account may lack permission to create them — so do not design around them.
+
+**Verify the write landed.** An update issued inside a compound command that failed earlier never
+ran at all. Read the state back rather than assuming the call succeeded.
 
 **Match the states the item type actually allows.** Work item types differ — one may offer only
 New/Active/Blocked/Closed while another adds Resolved and QC-verification states. Read the allowed
