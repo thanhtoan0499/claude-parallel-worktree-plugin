@@ -310,6 +310,12 @@
   table.tickets tbody tr:hover { background: var(--surface-hover); }
   table.tickets td.num { font-family: var(--font-mono); white-space: nowrap; }
   table.tickets td.title-cell { max-width: 420px; }
+  /* Ticket 8172 alone carries 18 attachments — this scrolls inside its own cell so the row
+     never forces the whole board (.table-wrap already scrolls too, but a single monster cell
+     would still stretch every other column with it) to scroll sideways. */
+  .evidence-list { display: flex; align-items: center; gap: 4px; max-width: 220px; overflow-x: auto; white-space: nowrap; }
+  .evidence-list .chip { flex-shrink: 0; }
+  .evidence-count { font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1197,6 +1203,29 @@ function ticketDriftTitle(t) {
   if (!t.state_drift) return null;
   return "ADO ghi " + (t.state || "—") + " nhưng " + t.state_drift.reason;
 }
+// The "Bằng chứng" column (BRIEF-EVIDENCE-2.md Part 3): clickable straight to the artifact, and a
+// ticket that owes evidence reads as owing it — reusing evidenceDrift() rather than recomputing
+// it, so this cell and Part 4's ticketSummary() line can never disagree about the same ticket.
+// A ticket that owes nothing stays quiet ("—"): no green tick, which would be noise on every row
+// that simply isn't done yet.
+function evidenceCell(t) {
+  const items = Array.isArray(t.evidence) ? t.evidence : [];
+  const drift = evidenceDrift(t, items, t.pr);
+  if (drift === "missing") return pill("pill-bad", "chưa có bằng chứng");
+  if (drift === "stale") return pill("pill-warn", "bằng chứng cũ hơn bản sửa");
+  if (!items.length) return "—";
+  return h(
+    "div", { class: "evidence-list" },
+    items.length > 1 ? h("span", { class: "evidence-count" }, items.length + " tệp") : null,
+    items.map((e) => {
+      const href = safeHref(e.url);
+      const label = e.name || "(không tên)";
+      return href
+        ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title: e.created || null }, label)
+        : h("span", { class: "chip" }, label);
+    }),
+  );
+}
 function ticketPrChip(pr) {
   if (!pr) return null;
   const tone = pr.state === "MERGED" ? "pill-good" : pr.state === "OPEN" ? "pill-accent" : "pill-neutral";
@@ -1236,6 +1265,7 @@ function ticketRow(t, opts) {
           title: "Xem card đang chạy việc này", onclick: () => jumpToAssignment(claimant.id),
         }, summary)
       : summary),
+    h("td", {}, evidenceCell(t)),
     h("td", {}, t.sprint || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
   ];
@@ -1248,6 +1278,7 @@ function ticketTable(rows, opts) {
     h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
     h("th", { title: "Đã tới đâu và đang vướng ai — bấm để mở card đang chạy việc này" },
       "Tóm tắt"),
+    h("th", { title: "Ảnh/log chứng minh vé đã được verify, bấm để mở" }, "Bằng chứng"),
     h("th", {}, "Sprint"), h("th", {}, "PR"),
   ];
   if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));

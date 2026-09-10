@@ -4511,3 +4511,80 @@ def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():
     assert '"Đang làm gì"' not in body.group(0), "the 'Đang làm gì' column survived the merge"
     assert '"Tóm tắt"' in body.group(0), "no 'Tóm tắt' column replaced them"
     assert '"Loại"' not in body.group(0), "the 'Loại' column is still there"
+
+
+# ---------------------------------------------------------------------------
+# The "Bằng chứng" column (BRIEF-EVIDENCE-2.md Part 3) — after Tóm tắt, before PR.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_cell_source():
+    script = _board_html_script()
+    body = re.search(r"^function evidenceCell\(.*?\n\}", script, re.S | re.M)
+    assert body, "evidenceCell() not found in board.html"
+    return body.group(0)
+
+
+def test_evidence_cell_reads_dash_for_a_ticket_that_owes_nothing():
+    """No green tick anywhere in this function — that would be noise on every not-yet-done row."""
+    src = _evidence_cell_source()
+    assert '"—"' in src
+    assert "✓" not in src and "✔" not in src and "tick" not in src.lower()
+
+
+def test_evidence_cell_shows_a_red_chip_for_missing_evidence():
+    src = _evidence_cell_source()
+    assert "pill-bad" in src
+    assert "chưa có bằng chứng" in src
+
+
+def test_evidence_cell_shows_a_yellow_chip_for_stale_evidence():
+    src = _evidence_cell_source()
+    assert "pill-warn" in src
+    assert "bằng chứng cũ hơn bản sửa" in src
+
+
+def test_evidence_cell_reads_evidence_drift_rather_than_recomputing_it():
+    """Part 4's own rule applies here too: one derivation, read everywhere."""
+    src = _evidence_cell_source()
+    assert "evidenceDrift(" in src
+
+
+def test_evidence_cell_links_straight_to_the_attachment_opening_a_new_tab():
+    src = _evidence_cell_source()
+    assert re.search(r'target:\s*"_blank"', src)
+    assert re.search(r'rel:\s*"noopener"', src)
+    assert re.search(r"href", src)
+    assert re.search(r"\.url\b", src), "the anchor is never built from the attachment's own url"
+
+
+def test_evidence_cell_shows_the_count_when_there_is_more_than_one():
+    src = _evidence_cell_source()
+    assert re.search(r"\.length\s*>\s*1", src), "no branch renders a count for more than one attachment"
+
+
+def test_evidence_column_sits_after_summary_and_before_pr():
+    script = _board_html_script()
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", script, re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "evidenceCell(" in src, "ticketRow() never renders the evidence cell"
+    summary_at = src.index("ticketSummary(")
+    evidence_at = src.index("evidenceCell(")
+    pr_at = src.index("ticketPrChip(")
+    assert summary_at < evidence_at < pr_at, "the evidence column is not between Tóm tắt and PR"
+
+    header = re.search(r"function ticketTable\(.*?\n\}\n", script, re.S).group(0)
+    assert '"Bằng chứng"' in header
+    assert header.index('"Tóm tắt"') < header.index('"Bằng chứng"') < header.index('"PR"')
+
+
+def test_evidence_wide_content_scrolls_in_its_own_container_not_the_page():
+    """Ticket 8172 alone carries 18 attachments — the row must never force the whole board to
+    scroll sideways. CSS lives in <style>, not <script> — read the raw file, not _board_html_script()."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    assert re.search(r"\.evidence-list\s*\{[^}]*overflow-x:\s*auto", html), (
+        "the evidence list has no own scroll container"
+    )
