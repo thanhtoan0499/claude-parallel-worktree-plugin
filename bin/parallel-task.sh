@@ -469,19 +469,57 @@ cmd_dispatch() {
   fi
 
   local pane="cc-$task"
-  # The TUI needs a moment before it will accept keys, and a fresh worktree raises a trust-folder
-  # dialog ("This folder pre-approves N tool permissions…"). Answering it here is the difference
-  # between a worker that starts and one that hangs before its first token.
-  sleep 4
-  tmux send-keys -t "$pane" Down 2>/dev/null || true
-  tmux send-keys -t "$pane" Enter 2>/dev/null || true
-  sleep 1
 
+  # Wait for the TUI, do not sleep at it. The first version of this used fixed sleeps and the
+  # brief was typed into a pane that had not finished booting — the worker sat at an empty prompt
+  # looking exactly like one that had been told nothing. Which is the whole failure mode this
+  # switch away from `claude --bg` was meant to end.
+  pane_has() { tmux capture-pane -p -t "$pane" 2>/dev/null | grep -qF "$1"; }
+  wait_for_pane() {  # <needle> <seconds>
+    local deadline=$((SECONDS + $2))
+    while ((SECONDS < deadline)); do
+      pane_has "$1" && return 0
+      sleep 1
+    done
+    return 1
+  }
+
+  # A fresh worktree raises a trust-folder dialog before the prompt ever appears. Answering it is
+  # one keypress here and a silent hang under --bg.
+  if wait_for_pane "trust" 8; then
+    tmux send-keys -t "$pane" Down
+    sleep 1
+    tmux send-keys -t "$pane" Enter
+  fi
+  if ! wait_for_pane "❯" 90; then
+    echo "error: '$task' never reached a prompt in tmux session $pane" >&2
+    echo "       attach and see what it is waiting on: cmew a $task" >&2
+    exit 1
+  fi
+
+  # The brief goes in a file and only a one-line pointer through send-keys: a long prompt piped
+  # through send-keys escaping arrives mangled, and a mangled brief is worse than none.
   local brief_path="$wt_path/BRIEF.md"
   printf '%s\n' "$prompt" > "$brief_path"
-  tmux send-keys -t "$pane" "Đọc BRIEF.md trong thư mục này rồi làm theo. Xong thì để báo cáo ở tin nhắn cuối và đừng thoát phiên." 2>/dev/null
-  sleep 1
-  tmux send-keys -t "$pane" Enter 2>/dev/null
+  local nudge="Đọc BRIEF.md trong thư mục này rồi làm theo. Xong thì để báo cáo ở tin nhắn cuối và đừng thoát phiên."
+  local sent=0 attempt
+  for attempt in 1 2 3; do
+    tmux send-keys -t "$pane" "$nudge"
+    sleep 1
+    # Typed, not just fired: confirm the text actually reached the input box before pressing
+    # Enter. Fire-and-hope is how a dispatched worker ends up idle with an empty prompt.
+    if pane_has "Đọc BRIEF.md"; then
+      tmux send-keys -t "$pane" Enter
+      sent=1
+      break
+    fi
+    sleep 2
+  done
+  if ((sent == 0)); then
+    echo "error: dispatched '$task' but its brief never reached the input box in $pane" >&2
+    echo "       the brief is at $brief_path — send it by hand: cmew a $task" >&2
+    exit 1
+  fi
 
   local short_id=""
 
