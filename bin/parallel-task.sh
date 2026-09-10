@@ -449,33 +449,55 @@ cmd_dispatch() {
     exit 1
   fi
 
-  local -a launch=(claude --bg -n "$task")
-  if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(--model "$DISPATCH_MODEL"); fi
-  if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(--effort "$DISPATCH_EFFORT"); fi
-  launch+=(--)
-  launch+=("$prompt")
+  # An INTERACTIVE tmux session (cmew), never `claude --bg`. The CTO has to be able to walk into
+  # a running worker and talk to it — "tôi muốn vào check và chat trực tiếp khi cần" — and a
+  # --bg session cannot be attached, cannot receive a message, and hides every permission prompt
+  # it stalls on. Five silent stalls on 2026-09-09 cost 5-25 minutes each, and three workers had
+  # to be killed and re-dispatched from scratch because a wrong brief could not be corrected.
+  #
+  # cmew boots an idle TUI and takes NO initial prompt, so the brief is written to a file inside
+  # the worktree and sent with one short send-keys line — piping a long prompt through send-keys
+  # escaping is how a brief arrives mangled.
+  local -a launch=(cmew new "$task" "$wt_path")
+  if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(-e "$DISPATCH_EFFORT"); fi
 
   local launch_out
-  if ! launch_out="$( cd "$wt_path" && "${launch[@]}" 2>&1 )"; then
-    echo "error: claude --bg failed to launch for '$task':" >&2
+  if ! launch_out="$( "${launch[@]}" 2>&1 )"; then
+    echo "error: cmew failed to launch '$task':" >&2
     echo "$launch_out" >&2
     exit 1
   fi
 
-  local short_id
-  if [[ "$launch_out" =~ backgrounded[[:space:]]·[[:space:]]([a-f0-9]+)[[:space:]]· ]]; then
-    short_id="${BASH_REMATCH[1]}"
-  else
-    echo "error: could not find a 'backgrounded · <id> · ...' line in claude --bg output for '$task':" >&2
-    echo "$launch_out" >&2
-    exit 1
-  fi
+  local pane="cc-$task"
+  # The TUI needs a moment before it will accept keys, and a fresh worktree raises a trust-folder
+  # dialog ("This folder pre-approves N tool permissions…"). Answering it here is the difference
+  # between a worker that starts and one that hangs before its first token.
+  sleep 4
+  tmux send-keys -t "$pane" Down 2>/dev/null || true
+  tmux send-keys -t "$pane" Enter 2>/dev/null || true
+  sleep 1
+
+  local brief_path="$wt_path/BRIEF.md"
+  printf '%s\n' "$prompt" > "$brief_path"
+  tmux send-keys -t "$pane" "Đọc BRIEF.md trong thư mục này rồi làm theo. Xong thì để báo cáo ở tin nhắn cuối và đừng thoát phiên." 2>/dev/null
+  sleep 1
+  tmux send-keys -t "$pane" Enter 2>/dev/null
+
+  local short_id=""
 
   local session_id
+  # cmew renames the session for display — "t8419-slug" is reported as "T8419-slug 🔹" — so the
+  # exact-name match that worked for `claude --bg` finds nothing here. Matching case-insensitively
+  # on the leading name is what keeps the registry join (board_state.session_docs) working; a
+  # miss shows an empty card on the board and says nothing about why.
+  sleep 3
   session_id="$(claude agents --json --all \
-    | jq -r --arg n "$task" '[.[] | select(.name==$n)] | sort_by(.startedAt) | last | .sessionId // empty')" || true
+    | jq -r --arg n "$task" '
+        [.[] | select((.name // "") | ascii_downcase | startswith($n | ascii_downcase))]
+        | sort_by(.startedAt) | last | .sessionId // empty')" || true
   if [[ -z "$session_id" ]]; then
-    echo "error: dispatched '$task' (short id $short_id) but could not resolve its session_id via 'claude agents --json'" >&2
+    echo "error: dispatched '$task' into tmux session $pane, but could not resolve its session_id" >&2
+    echo "       via 'claude agents --json'. Attach and check it started: cmew a $task" >&2
     exit 1
   fi
 
@@ -485,7 +507,14 @@ cmd_dispatch() {
     '{short_id:$sid, session_id:$fid}
        + (if $m == "" then {} else {model:$m} end)
        + (if $e == "" then {} else {effort:$e} end)')"
-  echo ">> $task dispatched: short id $short_id  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
+  echo ">> $task dispatched: tmux $pane  session $session_id${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
+  echo "   attach and talk to it:  cmew a $task     (detach: Ctrl-b then d)"
+  if [[ -n "$DISPATCH_MODEL" ]]; then
+    # Said out loud rather than swallowed: cmew has no model flag, and a silently ignored
+    # --model is how a worker ends up on a different model than the dispatcher intended.
+    echo "   note: --model $DISPATCH_MODEL was IGNORED — cmew has no model flag; switch it" >&2
+    echo "         inside the session with /model, or launch it by hand." >&2
+  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

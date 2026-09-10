@@ -224,6 +224,33 @@ def session_registry_drift(name: str, registry: dict) -> dict | None:
     return None
 
 
+def registry_key(name: str, registry: dict) -> str:
+    """The registry key this session's display name refers to, or the name unchanged.
+
+    cmew renames a session for display — dispatch `t8419-slug`, `claude agents --json` reports
+    `T8419-slug 🔹`, and an effort=ultracode session carries a 🔥 as well. The registry is keyed
+    by the task name parallel-task.sh dispatched, so an exact-match join misses every worker
+    started this way: the board draws a card with no branch, no worktree, no ticket, and
+    `managed: false` — which reads as somebody's own terminal rather than as work we dispatched.
+    That cost a manual double-registration of every worktree under both spellings on 2026-09-09.
+
+    Exact match first, so a task whose real name happens to differ only by case is never
+    silently folded into another. Only then the display form: trailing decoration stripped,
+    compared case-insensitively.
+    """
+    if not name or not registry:
+        return name
+    if name in registry:
+        return name
+    bare = "".join(ch for ch in name if ch.isalnum() or ch in "-_./").strip().lower()
+    if not bare:
+        return name
+    for key in registry:
+        if str(key).strip().lower() == bare:
+            return key
+    return name
+
+
 def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
                  now: float = 0.0, stale_after: float | None = None) -> dict[str, dict]:
     """One document per live task, keyed by task name.
@@ -279,7 +306,11 @@ def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
         if not name:
             # A document id cannot be empty; an unnamed agent has no addressable key.
             continue
-        docs[name] = build(name, agent, registry.get(name) or {})
+        # Keyed by the REGISTRY's name, not the display name: every other collection on this
+        # board (assignments' plan owners, a ticket's worker card) joins on the task name
+        # dispatch used, so a doc filed under "T8419-slug 🔹" is a card nothing can reach.
+        key = registry_key(name, registry)
+        docs[key] = build(key, agent, registry.get(key) or {})
     for name in claims:
         if name and name not in docs:
             docs[name] = build(name, {}, registry.get(name) or {})

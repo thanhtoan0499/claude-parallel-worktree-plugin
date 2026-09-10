@@ -4933,3 +4933,42 @@ def test_a_non_http_url_yields_no_link_at_all_rather_than_a_broken_one():
     assert out == "null", out
 
 
+
+
+# ---------------------------------------------------------------------------
+# cmew renames a session for display; the registry does not follow it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_cmew_renamed_session_still_joins_its_registry_row():
+    """Dispatch "t8419-slug", `claude agents --json` reports "T8419-slug 🔹". An exact-match join
+    misses, and the board draws a card with no branch, no worktree and managed:false — which reads
+    as somebody's own terminal rather than as work the manager dispatched."""
+    registry = {"t8419-slug": {"branch": "feature/t8419-slug", "path": "/wt/t8419-slug"}}
+    docs = session_docs([{"name": "T8419-slug 🔹", "sessionId": "s1", "state": "running"}], registry)
+
+    assert "t8419-slug" in docs, "the doc is filed under the display name nothing else can reach"
+    doc = docs["t8419-slug"]
+    assert doc["branch"] == "feature/t8419-slug"
+    assert doc["worktree"] == "/wt/t8419-slug"
+    assert doc["managed"] is True
+
+
+def test_an_ultracode_session_joins_too():
+    """effort=ultracode adds a 🔥 in front as well as the 🔹 behind."""
+    docs = session_docs([{"name": "🔥 T5061 🔹", "sessionId": "s1"}], {"t5061": {"branch": "b"}})
+    assert docs["t5061"]["branch"] == "b"
+
+
+def test_an_exact_name_is_never_folded_into_another_registry_row():
+    """Exact match wins, so two tasks that differ only by case stay two tasks."""
+    registry = {"Build": {"branch": "upper"}, "build": {"branch": "lower"}}
+    docs = session_docs([{"name": "build", "sessionId": "s1"}], registry)
+    assert docs["build"]["branch"] == "lower"
+
+
+def test_an_unregistered_session_keeps_its_own_name():
+    """Somebody's own terminal is not work we dispatched, and must not be renamed into one."""
+    docs = session_docs([{"name": "phien-cua-ai-do", "sessionId": "s1"}], {"t5061": {}})
+    assert "phien-cua-ai-do" in docs
+    assert docs["phien-cua-ai-do"]["managed"] is False
