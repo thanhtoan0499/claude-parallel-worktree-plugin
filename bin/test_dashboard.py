@@ -209,8 +209,8 @@ def test_get_ado_attachments_is_one_call_for_the_whole_batch():
         return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
 
     _attachments_with(mock_run, ["8172", "8325"])
-    assert len(calls) == 1, "must be exactly one az invocation for the whole batch, not one per ticket"
-    assert "workitemsbatch" in calls[0][calls[0].index("--url") + 1]
+    assert len(calls) == 1, "must be exactly one call for the whole batch, not one per ticket"
+    assert any("workitemsbatch" in str(part) for part in calls[0]), "no batch endpoint on the call"
 
 
 def test_get_ado_attachments_extracts_name_url_created_date_per_ticket():
@@ -1168,3 +1168,66 @@ def test_a_ticket_whose_type_is_absent_shapes_to_empty_rather_than_missing():
     from dashboard import _shape_ado_ticket
 
     assert _shape_ado_ticket({"id": 1, "fields": {}})["type"] == ""
+
+
+# ---------------------------------------------------------------------------
+# The batch attachment read. `az rest` cannot reach this org's REST API at all — it has no
+# AAD resource to derive, and forcing the ADO resource id returns "Identity ... has not been
+# materialized". Worse, it does that with EXIT CODE 0 and an HTML body, so a returncode
+# check passes and json.loads() is what finally blows up, several frames from the cause.
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_json_response_is_reported_as_such_rather_than_crashing_in_the_parser():
+    """Exit code 0 plus an HTML sign-in page is the shape this API fails in. A JSONDecodeError
+    several frames away names neither the call nor the cause."""
+    import pytest
+
+    from dashboard import get_ado_attachments
+
+    def mock_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = "<!DOCTYPE html><html><title>Identity ... has not been materialized</title>"
+            stderr = ""
+        return R()
+
+    with pytest.raises(RuntimeError, match="(?i)not json|materialized|workitemsbatch"):
+        _attachments_with(mock_run, ["8172"])
+
+
+def test_the_batch_read_authenticates_with_the_pat_not_the_az_session():
+    """The same credential attach_evidence.py already proves works against this org."""
+    from dashboard import get_ado_attachments
+
+    seen = {}
+
+    def mock_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = '{"value": []}'
+            stderr = ""
+        return R()
+
+    _attachments_with(mock_run, ["8172"])
+    assert seen["cmd"][0] == "curl", "still shelling out to az rest, which cannot reach this org"
+    assert "-u" in seen["cmd"], "no PAT credential on the call"
+
+
+def test_the_pat_never_reaches_the_error_message_when_the_batch_read_fails():
+    """A raised RuntimeError ends up in logs and in the board's error surface."""
+    import pytest
+
+    from dashboard import get_ado_attachments
+
+    def mock_run(cmd, **kwargs):
+        class R:
+            returncode = 22
+            stdout = ""
+            stderr = "curl: (22) failed"
+        return R()
+
+    with pytest.raises(RuntimeError) as exc:
+        _attachments_with(mock_run, ["8172"])
+    assert "FAKEPAT" not in str(exc.value)

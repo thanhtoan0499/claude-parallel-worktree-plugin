@@ -482,21 +482,39 @@ def get_ado_attachments(ids: list[str]) -> dict[str, list[dict]]:
     if not ids:
         return {}
 
+    # curl + PAT, not `az rest`: this org's REST API is unreachable through the az session —
+    # without --resource az cannot derive an AAD resource at all, and WITH the ADO resource id it
+    # answers "Identity ... has not been materialized". The PAT attach_evidence.py already uses is
+    # the credential that provably works here. Read fresh per call, never logged, never cached.
+    from attach_evidence import read_pat
+
+    pat = read_pat()
     result = subprocess.run(
         [
-            "az", "rest", "--method", "post",
-            "--url", f"{_ADO_ORG}/{_ADO_PROJECT}/_apis/wit/workitemsbatch?api-version=7.1",
-            "--headers", "Content-Type=application/json",
-            "--body", json.dumps({"ids": [int(i) for i in ids], "$expand": "relations"}),
+            "curl", "-sS", "-u", f":{pat}",
+            "-H", "Content-Type: application/json",
+            "--data-binary", json.dumps({"ids": [int(i) for i in ids], "$expand": "relations"}),
+            f"{_ADO_ORG}/{_ADO_PROJECT}/_apis/wit/workitemsbatch?api-version=7.1",
         ],
         capture_output=True, text=True, timeout=20,
     )
     if result.returncode != 0:
+        # stderr only — a curl command line carrying `-u :<pat>` must never reach a log or the
+        # board's error surface.
         raise RuntimeError(
-            f"az rest workitemsbatch exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+            f"workitemsbatch: curl exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
         )
+    try:
+        payload = json.loads(result.stdout)
+    except ValueError as exc:
+        # Exit code 0 with an HTML sign-in page is exactly how this endpoint refuses a bad
+        # credential. Letting json.loads raise puts a JSONDecodeError several frames from the
+        # cause and names neither the call nor the reason.
+        raise RuntimeError(
+            f"workitemsbatch: response is not JSON ({exc}): {result.stdout.strip()[:200]}"
+        ) from exc
     attachments: dict[str, list[dict]] = {i: [] for i in ids}
-    for item in json.loads(result.stdout).get("value") or []:
+    for item in payload.get("value") or []:
         wid = str(item.get("id"))
         for rel in item.get("relations") or []:
             if rel.get("rel") != "AttachedFile":
