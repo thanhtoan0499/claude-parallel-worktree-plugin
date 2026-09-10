@@ -3,6 +3,7 @@
 state_drift can prove, dry-run by default, owner's tickets only, never Closed/Removed.
 """
 
+import os
 import json
 
 from ado_state_sync import eligible_state_syncs, read_ticket_docs, sync_tickets
@@ -203,3 +204,52 @@ def test_a_state_only_plan_never_passes_an_empty_assignee_to_az():
     }, "https://dev.azure.com/agentiqai", dry_run=False, run=fake_run)
 
     assert "--assigned-to" not in calls[0]
+
+
+# ---------------------------------------------------------------------------
+# A quiet cron is indistinguishable from a dead one. Enabling --apply on 2026-09-10 produced
+# an empty log, and nothing in it said whether the sync had run and found nothing or had
+# never been reached at all — the exact ambiguity that let three inert rules ship.
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_that_changes_nothing_still_says_it_ran_and_what_it_looked_at():
+    from ado_state_sync import summarise
+
+    line = summarise(checked=149, results=[], dry_run=False)
+    assert "149" in line
+    assert "0" in line
+    assert "dry-run" not in line
+
+
+def test_the_summary_says_dry_run_when_nothing_could_have_been_written():
+    """Reading "changed 0" off a dry run and concluding the backlog is clean is the same
+    mistake in a different place."""
+    from ado_state_sync import summarise
+
+    assert "dry-run" in summarise(checked=149, results=[], dry_run=True)
+
+
+def test_the_summary_counts_failures_apart_from_writes():
+    from ado_state_sync import summarise
+
+    line = summarise(checked=10, dry_run=False, results=[
+        {"applied": True, "error": None},
+        {"applied": False, "error": "az exploded"},
+    ])
+    assert "1" in line and "lỗi" in line.lower()
+
+
+def test_main_prints_the_summary_even_on_a_snapshot_with_no_drift(tmp_path, capsys):
+    import json
+
+    from ado_state_sync import main
+
+    snap = tmp_path / "s.json"
+    snap.write_text(json.dumps({"tickets/8471": {"state": "Closed", "handed_off": False}}))
+    os.environ["BOARD_MIRROR_SNAPSHOT"] = str(snap)
+    try:
+        assert main([]) == 0
+    finally:
+        os.environ.pop("BOARD_MIRROR_SNAPSHOT", None)
+    assert "ado_state_sync" in capsys.readouterr().out

@@ -121,6 +121,21 @@ def sync_tickets(tickets: dict[str, dict], org: str, dry_run: bool = True, run=s
     return results
 
 
+def summarise(*, checked: int, results: list[dict], dry_run: bool) -> str:
+    """The one line this script always prints, whether or not it found anything.
+
+    A cron that logs only when it acts cannot be told apart from a cron that is not running, and
+    "no output" then reads as "all clear" — which is how three separate rules shipped inert and
+    went unnoticed for weeks. So: how many tickets were examined, how many moved, how many
+    failed, and whether writing was even possible on this run.
+    """
+    written = sum(1 for r in results if r.get("applied"))
+    failed = sum(1 for r in results if r.get("error"))
+    mode = " [dry-run]" if dry_run else ""
+    tail = f", {failed} lỗi" if failed else ""
+    return f"ado_state_sync{mode}: soát {checked} vé, sửa {written}{tail}"
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -138,6 +153,7 @@ def main(argv=None) -> int:
         return 1
 
     results = sync_tickets(tickets, args.org, dry_run=not args.apply)
+    print(summarise(checked=len(tickets), results=results, dry_run=not args.apply))
     return 1 if any(r["error"] for r in results) else 0
 
 
