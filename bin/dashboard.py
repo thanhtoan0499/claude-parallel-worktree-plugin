@@ -537,6 +537,9 @@ def get_ado_attachments(ids: list[str]) -> dict[str, list[dict]]:
 # innerHTML fails silently inside the artifact sandbox, so handing the page markup would leave a
 # blank cell and no error anywhere.
 _REPORT_NAME_RE = re.compile(r"^report-AB\d+\.json$", re.IGNORECASE)
+# Prose for ~10 requirements runs a few KB. Anything approaching this is carrying bytes that
+# do not belong in a prompt.
+_MAX_REPORT_BYTES = 64 * 1024
 
 
 def _attach_report_body(rows: list[dict], pat: str) -> None:
@@ -546,9 +549,12 @@ def _attach_report_body(rows: list[dict], pat: str) -> None:
     exactly as it was, and the evidence column falls back to saying no report exists. One bad
     attachment must not cost the whole board its evidence data.
     """
-    row = next((r for r in rows if _REPORT_NAME_RE.match(r.get("name") or "")), None)
-    if not row or not row.get("url"):
+    # Newest, not first: a ticket accumulates one report relation per submission, and the oldest
+    # is the one least likely to describe the code that is actually merged.
+    candidates = [r for r in rows if _REPORT_NAME_RE.match(r.get("name") or "") and r.get("url")]
+    if not candidates:
         return
+    row = max(candidates, key=lambda r: r.get("created") or "")
     sep = "&" if "?" in row["url"] else "?"
     result = subprocess.run(
         ["curl", "-sS", "-u", f":{pat}", f"{row['url']}{sep}fileName={row['name']}&download=false"],
@@ -559,6 +565,12 @@ def _attach_report_body(rows: list[dict], pat: str) -> None:
     try:
         report = json.loads(result.stdout)
     except ValueError:
+        return
+    # A report big enough to matter cannot survive the trip: the board's writes go through a
+    # `claude -p` prompt, and a large blob comes back recomposed rather than copied. Dropping it
+    # here makes the column say "chưa có báo cáo" — visibly wrong, and therefore fixable — instead
+    # of publishing a document a model improvised.
+    if len(result.stdout) > _MAX_REPORT_BYTES:
         return
     if isinstance(report, dict) and report.get("results"):
         row["body"] = report

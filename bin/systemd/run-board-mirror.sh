@@ -184,9 +184,16 @@ for ((i = 0; i < ${#BATCHES[@]}; i++)); do
   # `--disallowedTools` then narrows back down explicitly (this one-line "write_db a batch" prompt
   # has no business touching Bash/Edit/Write/Agent/Workflow/Skill/ToolSearch), which is why this is
   # bypass-then-restrict rather than the wide-open default bypassPermissions would otherwise be.
+  #
+  # The prompt goes in on STDIN, not as an argv word. Linux caps a SINGLE argument at 128 KB
+  # (MAX_ARG_STRLEN, 32 pages) independently of the much larger total ARG_MAX, and batching does
+  # not help because it splits by entry COUNT: one ticket document carrying an evidence report
+  # with embedded screenshots is on its own past the cap, and the exec fails outright with
+  # "Argument list too long" before Claude ever starts. `claude -p` with no positional prompt
+  # reads it from stdin, which has no such limit (verified live 2026-09-10).
   if ! RAW_OUTPUT="$("$CLAUDE_BIN" -p --permission-mode bypassPermissions \
     --disallowedTools Bash Edit Write Agent Workflow Skill ToolSearch \
-    --output-format json -- "$PROMPT" 2>&1)"; then
+    --output-format json <<<"$PROMPT" 2>&1)"; then
     echo "run-board-mirror: claude -p exited non-zero on batch $((i + 1))/${#BATCHES[@]}: $RAW_OUTPUT" >&2
     exit 1
   fi

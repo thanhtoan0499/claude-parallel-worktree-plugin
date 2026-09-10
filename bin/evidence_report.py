@@ -325,10 +325,16 @@ def bundle(manifest: dict, base_dir, urls: dict | None = None) -> dict:
     """The same report as `render()`, but as data the board can build with its own h() helper.
 
     The board cannot take the html: assigning innerHTML fails SILENTLY inside the artifact
-    sandbox, which would leave a blank cell with no error anywhere — and it cannot load the
-    images from ADO either (the sandbox blocks off-allowlist image hosts, and a cross-site
-    request would not carry the ADO session cookie in any case). So every image is resolved to a
-    data: URI here, once, and both views render from this one structure.
+    sandbox, which would leave a blank cell with no error anywhere.
+
+    TEXT ONLY, no embedded image bytes. The board's data reaches the artifact through a
+    `claude -p` session's prompt (bin/systemd/run-board-mirror.sh), so every byte here passes
+    through a model's context on the way. A few KB of prose survives that verbatim; 135 KB of
+    base64 does not — on 2026-09-10 the first bundle carrying screenshots came out the far end as
+    a document the model had recomposed, with `evidence` emptied and two invented keys. Images
+    therefore stay as `href` links to the ADO original (which opens fine in a tab) and are
+    embedded only in the standalone html a person downloads. Putting them on the board needs the
+    artifact asset store, not a bigger prompt.
     """
     base, urls = pathlib.Path(base_dir), (urls or {})
     out = json.loads(json.dumps(manifest))  # never mutate the caller's manifest
@@ -338,8 +344,9 @@ def bundle(manifest: dict, base_dir, urls: dict | None = None) -> dict:
             name = e.get("file", "")
             if urls.get(name):
                 e["href"] = _ado_href(name, urls)
-            if name.lower().endswith(IMAGE_SUFFIXES):
-                e["src"] = _data_uri(base / name)
+            # `src` is deliberately NOT filled — see the docstring. The board's renderer still
+            # honours it, which is the seam for serving screenshots from the artifact asset store
+            # later; until then an image is a link like every other file.
     out["checklist_text"] = CHECKLIST_TEXT
     return out
 

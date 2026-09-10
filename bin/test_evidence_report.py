@@ -10,7 +10,7 @@ this whole file exists to catch.
 
 import json
 
-from evidence_report import CHECKLIST_KEYS, MAIN_RE, build, render, validate
+from evidence_report import CHECKLIST_KEYS, MAIN_RE, build, bundle, render, validate
 
 
 def _manifest(tmp_path, **over):
@@ -154,3 +154,23 @@ def test_evidence_urls_become_links_when_known(tmp_path):
 def test_report_titles_carry_the_ticket(tmp_path):
     html = render(_manifest(tmp_path), tmp_path)
     assert "AB#6541" in html
+
+
+def test_the_board_bundle_carries_no_image_bytes(tmp_path):
+    """The board's data travels through a `claude -p` prompt, so a bundle carrying base64
+    screenshots comes back recomposed rather than copied — measured 2026-09-10, when the first
+    such bundle published with `evidence` emptied and two invented keys. Prose survives; bytes
+    do not."""
+    (tmp_path / "shot.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)  # header is enough — nothing should read it
+    m = _manifest(tmp_path)
+    m["results"][0]["evidence"].append({"file": "shot.png", "proves": "màn hình sau khi sửa"})
+    out = json.dumps(bundle(m, tmp_path))
+    assert "data:image" not in out
+    assert len(out) < 8000, "the bundle is carrying something that is not prose"
+
+
+def test_the_board_bundle_keeps_the_link_to_the_original(tmp_path):
+    m = _manifest(tmp_path)
+    out = bundle(m, tmp_path, {"log.txt": "https://dev.azure.com/agentiqai/x/_apis/wit/attachments/abc"})
+    assert out["results"][0]["evidence"][0]["href"].endswith("download=false")
