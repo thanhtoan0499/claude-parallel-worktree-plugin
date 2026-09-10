@@ -4730,8 +4730,9 @@ def test_the_report_opens_in_place_rather_than_linking_out():
 
 
 def test_the_report_is_built_through_h_not_innerhtml():
-    """Assigning innerHTML fails SILENTLY in the artifact sandbox — the report would be a blank
-    cell with no error anywhere. That is why the mirror ships data, not markup."""
+    """Assigning innerHTML is inert in the artifact sandbox — the report would be a blank cell
+    with no error anywhere — and markup that came off an ADO attachment has no business being
+    injected into a published page. Both reasons say: build it, do not paste it."""
     src = _board_html_text()
     fn = re.search(r"function reportNode\(.*?\n\}\n", src, re.S)
     assert fn, "reportNode() not found"
@@ -4739,14 +4740,75 @@ def test_the_report_is_built_through_h_not_innerhtml():
     assert 'h("table"' in fn.group(0), "the results table is not built through h()"
 
 
-def test_report_screenshots_are_embedded_not_fetched_from_ado():
-    """The sandbox blocks off-allowlist image hosts, and a cross-site ADO request would not carry
-    the session cookie either — a remote src renders an empty box with no error."""
+def test_report_screenshots_are_served_by_the_artifact_itself():
+    """The sandbox blocks images from off-allowlist hosts, and a cross-site ADO request would not
+    carry the session cookie either — a remote src renders an empty box with no error."""
     src = _board_html_text()
     fn = re.search(r"function reportEvidence\(.*?\n\}\n", src, re.S)
     assert fn, "reportEvidence() not found"
-    assert "e.src" in fn.group(0), "the screenshot never comes from the embedded data URI"
+    assert "e.src" in fn.group(0), "the screenshot never comes from the artifact's asset store"
     assert "dev.azure.com" not in fn.group(0)
+
+
+def test_the_board_and_the_html_file_share_one_report_stylesheet():
+    """Two renderers are forced (see above); two LOOKS are not. board.html carries
+    evidence_report.CSS verbatim between its markers, so a style fixed in one place is fixed in
+    both. Re-sync with:
+
+        python3 -c "import sys;sys.path.insert(0,'bin');import evidence_report as e;\
+print(e.CSS.strip())"
+
+    and paste the output between the markers in board.html.
+    """
+    from evidence_report import CSS
+
+    src = _board_html_text()
+    block = re.search(r"generated from evidence_report\.CSS[^\n]*\n(.*?)\n\s*/\* == end report css",
+                      src, re.S)
+    assert block, "the report css markers are missing from board.html"
+    assert block.group(1).strip() == CSS.strip(), (
+        "board.html's report css has drifted from evidence_report.CSS — see this test's docstring"
+    )
+
+
+def _png(path):
+    """A real 1x1 PNG — the html renderer opens it to inline a thumbnail, so a fake header is not
+    enough here."""
+    import base64
+
+    path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+
+
+def test_both_renderers_emit_the_same_report_markup(tmp_path):
+    """A shared stylesheet only helps while both renderers reach for the same tags and classes.
+    This is the tripwire for one of them quietly growing its own."""
+    import evidence_report
+
+    manifest = {
+        "ticket": 1, "type": "bug", "title": "t",
+        "requirement": {"source": "AC-1", "text": "phải thế này"},
+        "changed": ["a.py — đổi gì đó"],
+        "results": [{"req": "r", "verdict": "đạt", "note": "ghi chú",
+                     "evidence": [{"file": "log.txt", "proves": "chứng minh gì đó"},
+                                  {"file": "shot.png", "proves": "màn hình sau khi sửa"}]}],
+        "red_green": {"how": "gỡ ra", "red": "FAILED", "green": "PASSED"},
+        "blockers": ["còn vướng"],
+        "checklist": dict.fromkeys(evidence_report.CHECKLIST_KEYS, True),
+    }
+    (tmp_path / "log.txt").write_text("x", encoding="utf-8")
+    _png(tmp_path / "shot.png")
+    html = evidence_report.render(manifest, tmp_path)
+
+    js = re.search(r"function reportNode\(.*?\n\}\n", _board_html_text(), re.S).group(0)
+    js += re.search(r"function reportEvidence\(.*?\n\}\n", _board_html_text(), re.S).group(0)
+
+    for cls in ("sub", "meta", "req", "ev", "what", "cols", "lbl", "code", "why", "plain"):
+        assert f'class="{cls}' in html or f'class="{cls}"' in html, f"html renderer dropped .{cls}"
+        assert f'"{cls}' in js, f"board renderer dropped .{cls}"
+    for tag in ("h1", "h2", "blockquote", "figure", "figcaption", "pre", "table", "thead", "tbody"):
+        assert f"<{tag}" in html, f"html renderer dropped <{tag}>"
+        assert f'"{tag}"' in js, f"board renderer dropped <{tag}>"
 
 
 def test_every_report_verdict_word_has_a_tone():

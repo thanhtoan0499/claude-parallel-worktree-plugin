@@ -319,45 +319,60 @@
      names are readable without any interaction at all; the full name is one hover away. */
   /* The report is the cell. It needs room the old three-chips-and-a-count list never did. */
   .evidence-cell > details.collapsed-group { width: 100%; margin-top: 0; }
-  .evidence-cell > details.collapsed-group > summary { font-size: 12px; font-weight: 600; }
-  .rpt { max-height: 70vh; overflow-y: auto; margin-top: 8px; padding: 14px 16px 18px;
-    border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); font-size: 13px;
-    line-height: 1.55; max-width: 620px; }
-  .rpt h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint);
-    margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border-soft); font-weight: 600; }
-  .rpt h4:first-of-type { margin-top: 14px; }
-  .rpt .rpt-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11.5px;
-    color: var(--faint); }
-  .rpt .rpt-meta b { color: var(--ink); font-weight: 600; }
-  .rpt blockquote { margin: 0 0 8px; padding: 8px 12px; border-left: 3px solid var(--accent);
-    background: var(--surface); font-size: 12.5px; }
-  .rpt .rpt-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-  .rpt .rpt-table td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border-soft);
-    vertical-align: top; }
-  .rpt td.rpt-req { width: 32%; font-weight: 600; }
-  .rpt td.rpt-code { font-family: var(--font-mono); font-weight: 600; width: 58px; }
-  .rpt .rpt-v { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 11px;
-    font-weight: 600; white-space: nowrap; }
-  .rpt .rpt-v.ok { background: var(--good-soft); color: var(--good-ink); }
-  .rpt .rpt-v.warn { background: var(--warn-soft); color: var(--warn-ink); }
-  .rpt .rpt-v.bad { background: var(--bad-soft); color: var(--bad-ink); }
-  .rpt ul.rpt-ev { margin: 0; padding: 0; list-style: none; }
-  .rpt ul.rpt-ev li { margin-bottom: 8px; }
-  .rpt ul.rpt-ev li:last-child { margin-bottom: 0; }
-  .rpt ul.rpt-ev a, .rpt ul.rpt-ev code { font-family: var(--font-mono); font-size: 11px; }
-  .rpt .rpt-what { color: var(--faint); font-size: 12px; margin-top: 2px; }
-  .rpt ul.rpt-plain { margin: 4px 0; padding-left: 17px; }
-  .rpt ul.rpt-plain li { margin-bottom: 5px; }
-  .rpt pre { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 6px;
-    padding: 9px 11px; overflow-x: auto; font-size: 11px; line-height: 1.5; margin: 5px 0 0;
-    white-space: pre; }
-  .rpt .rpt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .rpt .rpt-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
-  .rpt .rpt-lbl.bad { color: var(--bad-ink); } .rpt .rpt-lbl.ok { color: var(--good-ink); }
-  .rpt figure { margin: 10px 0 0; }
-  .rpt figure img { width: 100%; border: 1px solid var(--border-soft); border-radius: 6px; display: block; }
-  .rpt figcaption { color: var(--faint); font-size: 11.5px; margin-top: 4px; }
-  @media (max-width: 900px) { .rpt .rpt-cols { grid-template-columns: 1fr; } }
+  .evidence-cell > details.collapsed-group > summary { font-size: var(--fs-sm); font-weight: 600; }
+  /* The report renders IDENTICALLY here and in the html file a person downloads, because both
+     read the same stylesheet: everything between the markers below is evidence_report.CSS,
+     verbatim. test_board_state.py fails if the two ever differ, and names the one-liner that
+     re-syncs them — two renderers are unavoidable (innerHTML is inert in this sandbox, and
+     injecting attachment-sourced markup would be an XSS surface), two LOOKS are not. */
+  /* == report css: generated from evidence_report.CSS — do not hand-edit == */
+.rpt{--bg:#fbfbfa;--fg:#1c1c1a;--muted:#6b6b66;--line:#e2e1dc;--card:#fff;
+--ok:#1a7f4b;--okbg:#e7f5ec;--warn:#9a6400;--warnbg:#fdf3df;--bad:#b3261e;--badbg:#fbe9e7;--acc:#2b5fa8;
+background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+@media(prefers-color-scheme:dark){.rpt{--bg:#16171a;--fg:#e8e8e4;--muted:#9a9a94;
+--line:#2e3034;--card:#1d1f23;--ok:#6fd39b;--okbg:#16301f;--warn:#e0b25a;--warnbg:#332816;
+--bad:#f2938c;--badbg:#3a1c1a;--acc:#83b0ef}}
+.rpt *{box-sizing:border-box}
+.rpt main{max-width:840px;margin:0 auto;padding:34px 22px 60px}
+.rpt h1{font-size:21px;line-height:1.3;margin:0 0 4px;color:var(--fg)}
+.rpt h2{font-size:15px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
+text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.rpt .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+.rpt .meta{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:12.5px;color:var(--muted);
+border:1px solid var(--line);background:var(--card);border-radius:8px;padding:11px 15px}
+.rpt .meta b{color:var(--fg);font-weight:600}
+.rpt table{width:100%;border-collapse:collapse;font-size:13.5px;margin:0}
+.rpt th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+font-weight:600;padding:0 9px 6px 0;border-bottom:1px solid var(--line);background:none}
+.rpt td{padding:10px 9px 10px 0;border-bottom:1px solid var(--line);vertical-align:top;background:none}
+.rpt td.req{width:29%;font-weight:600}
+.rpt .v{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.rpt .v.ok{background:var(--okbg);color:var(--ok)}.rpt .v.warn{background:var(--warnbg);color:var(--warn)}
+.rpt .v.bad{background:var(--badbg);color:var(--bad)}
+.rpt ul.ev{margin:0;padding:0;list-style:none}
+.rpt ul.ev li{margin-bottom:9px}.rpt ul.ev li:last-child{margin-bottom:0}
+.rpt ul.ev a,.rpt ul.ev code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--acc)}
+.rpt .what{color:var(--muted);font-size:12.5px;margin-top:2px}
+.rpt pre{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+overflow-x:auto;font-size:11.5px;line-height:1.5;margin:6px 0 0;color:var(--fg);white-space:pre}
+.rpt .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:700px){.rpt .cols{grid-template-columns:1fr}.rpt td.req{width:auto}}
+.rpt .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+.rpt .lbl.r{color:var(--bad)}.rpt .lbl.g{color:var(--ok)}
+.rpt td.code{font-family:ui-monospace,Menlo,monospace;font-weight:600;width:66px}
+.rpt td.why{color:var(--muted);font-size:12.5px}
+.rpt blockquote{margin:0 0 12px;padding:9px 14px;border-left:3px solid var(--acc);background:var(--card);font-size:14px}
+.rpt figure{margin:12px 0 0}
+.rpt figure img{width:100%;border:1px solid var(--line);border-radius:7px;display:block}
+.rpt figcaption{color:var(--muted);font-size:12px;margin-top:5px}
+.rpt code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}
+.rpt a{color:var(--acc)}.rpt p{margin:8px 0}
+.rpt ul.plain{margin:6px 0;padding-left:19px}.rpt ul.plain li{margin-bottom:6px}
+  /* == end report css == */
+  /* Board-only: the report lives inside a table cell, so it is boxed and scrolls on its own. */
+  .evidence-cell .rpt { max-height: 70vh; overflow-y: auto; margin-top: 8px; max-width: 640px;
+    border: 1px solid var(--border-soft); border-radius: var(--radius-m); }
+  .evidence-cell .rpt main { padding: 16px 18px 22px; }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1272,35 +1287,42 @@ function evidenceHref(url, name) {
 
 const REPORT_TONE = { "đạt": "ok", "đạt một phần": "warn", "chưa chứng minh": "warn", "không đạt": "bad" };
 
+// Every builder below emits the SAME tags and classes as evidence_report.render()'s html, so the
+// one stylesheet above dresses both and the report reads identically in the board and in the file
+// a person downloads. A parity test pins the tag/class set; keep the two in step when either moves.
 function reportEvidence(entries) {
   const list = Array.isArray(entries) ? entries : [];
   const files = list.filter((e) => e && !e.src);
   const shots = list.filter((e) => e && e.src);
   return [
     files.length
-      ? h("ul", { class: "rpt-ev" }, files.map((e) =>
+      ? h("ul", { class: "ev" }, files.map((e) =>
           h("li", {},
             e.href
               ? h("a", { href: safeHref(e.href), target: "_blank", rel: "noopener" }, e.file)
               : h("code", {}, e.file),
-            h("div", { class: "rpt-what" }, e.proves || ""))))
+            h("div", { class: "what" }, e.proves || ""))))
       : null,
-    // The screenshot travels inside the report as a data: URI. The artifact sandbox blocks images
-    // from off-allowlist hosts, and an ADO url would not carry the session cookie cross-site
-    // either — so a remote src would render an empty box with no error.
-    shots.map((e) => h("figure", {},
-      h("img", { src: e.src, alt: e.proves || e.file }),
-      h("figcaption", {}, e.proves || ""))),
+    // The screenshot is served by the artifact itself ("/_blob/<id>", written by the report's
+    // bundle). The sandbox blocks images from any other host, and a cross-site ADO request would
+    // not carry the session cookie either — a remote src renders an empty box with no error.
+    shots.map((e) => {
+      const img = h("img", { src: e.src, alt: e.proves || e.file });
+      return h("figure", {},
+        e.href ? h("a", { href: safeHref(e.href), target: "_blank", rel: "noopener" }, img) : img,
+        h("figcaption", {}, e.proves || ""));
+    }),
   ];
 }
 
 function reportSection(title, ...body) {
-  return body.flat(Infinity).some((x) => x) ? [h("h4", {}, title), ...body] : null;
+  return body.flat(Infinity).some((x) => x) ? [h("h2", {}, title), ...body] : null;
 }
 
 // The report, built the same way every other part of this page is built. It arrives as data
-// (dashboard._attach_report_body) rather than markup because assigning innerHTML fails SILENTLY
-// in the artifact sandbox — a blank cell, no error, nobody the wiser.
+// (dashboard._attach_report_body) rather than markup because assigning innerHTML is inert in the
+// artifact sandbox — a blank cell, no error, nobody the wiser — and because markup that came off
+// an ADO attachment has no business being injected into a published page.
 function reportNode(r) {
   const meta = [["PR", r.pr && "#" + r.pr], ["Commit", r.commit], ["Người chạy", r.run_by],
                 ["Lúc", r.run_at], ["Môi trường", r.env]]
@@ -1309,49 +1331,51 @@ function reportNode(r) {
 
   const req = r.requirement || {};
   const rows = (r.results || []).map((x) => h("tr", {},
-    h("td", { class: "rpt-req" }, x.req),
-    h("td", {}, h("span", { class: "rpt-v " + (REPORT_TONE[x.verdict] || "warn") }, x.verdict)),
-    h("td", {}, reportEvidence(x.evidence), x.note ? h("div", { class: "rpt-what" }, x.note) : null)));
+    h("td", { class: "req" }, x.req),
+    h("td", {}, h("span", { class: "v " + (REPORT_TONE[x.verdict] || "warn") }, x.verdict)),
+    h("td", {}, reportEvidence(x.evidence), x.note ? h("div", { class: "what" }, x.note) : null)));
 
   const rg = r.red_green || {};
   const ck = (r.checklist_text ? Object.keys(r.checklist_text) : []).map((key) => {
     const val = (r.checklist || {})[key];
     const done = val === true;
     return h("tr", {},
-      h("td", { class: "rpt-code" }, key),
+      h("td", { class: "code" }, key),
       h("td", {}, r.checklist_text[key]),
-      h("td", {}, h("span", { class: "rpt-v " + (done ? "ok" : "warn") }, done ? "xong" : "chưa")),
-      h("td", { class: "rpt-what" }, done ? "" : String(val || "")));
+      h("td", {}, h("span", { class: "v " + (done ? "ok" : "warn") }, done ? "xong" : "chưa")),
+      h("td", { class: "why" }, done ? "" : String(val || "")));
   });
 
-  return h("div", { class: "rpt" },
-    h("div", { class: "rpt-meta" }, meta),
+  const typeLabel = { bug: "Bug", task: "Task", doc: "Tài liệu" }[r.type] || r.type || "";
+  return h("div", { class: "rpt" }, h("main", {},
+    h("h1", {}, "AB#" + r.ticket + " — " + (r.title || "")),
+    h("p", { class: "sub" }, [typeLabel, r.sprint, r.subtitle].filter(Boolean).join(" · ")),
+    h("div", { class: "meta" }, meta),
     reportSection("Vé yêu cầu gì",
       req.text ? h("blockquote", {}, req.source ? h("b", {}, req.source + " — ") : null, req.text) : null,
       reportEvidence(req.evidence)),
     reportSection("Đã sửa gì",
-      (r.changed || []).length ? h("ul", { class: "rpt-plain" }, (r.changed || []).map((c) => h("li", {}, c))) : null),
-    h("h4", {}, "Kết quả"),
-    h("table", { class: "rpt-table" }, h("tbody", {}, rows)),
+      (r.changed || []).length ? h("ul", { class: "plain" }, (r.changed || []).map((c) => h("li", {}, c))) : null),
+    h("h2", {}, "Kết quả"),
+    h("table", {}, h("thead", {}, h("tr", {},
+      h("th", {}, r.type === "doc" ? "Mục" : "Yêu cầu"), h("th", {}),
+      h("th", {}, r.type === "doc" ? "Nội dung — ở đâu" : "Bằng chứng — chứng minh điều gì"))),
+      h("tbody", {}, rows)),
     reportSection("Gỡ thay đổi ra thì test đỏ",
-      rg.how ? h("div", { class: "rpt-what" }, rg.how) : null,
+      rg.how ? h("p", { class: "what" }, rg.how) : null,
       rg.red && rg.green
-        ? h("div", { class: "rpt-cols" },
-            h("div", {}, h("div", { class: "rpt-lbl bad" }, "đã gỡ"), h("pre", {}, rg.red)),
-            h("div", {}, h("div", { class: "rpt-lbl ok" }, "khôi phục"), h("pre", {}, rg.green)))
+        ? h("div", { class: "cols" },
+            h("div", {}, h("div", { class: "lbl r" }, "đã gỡ"), h("pre", {}, rg.red)),
+            h("div", {}, h("div", { class: "lbl g" }, "khôi phục"), h("pre", {}, rg.green)))
         : null),
     reportSection("Còn vướng · cần quyết",
       (r.blockers || []).length
-        ? h("ul", { class: "rpt-plain" }, (r.blockers || []).map((b) => h("li", {}, b)))
+        ? h("ul", { class: "plain" }, (r.blockers || []).map((b) => h("li", {}, b)))
         : null),
-    h("h4", {}, "Checklist DoD"),
-    h("table", { class: "rpt-table" }, h("tbody", {}, ck)));
+    h("h2", {}, "Checklist DoD"),
+    h("table", {}, h("tbody", {}, ck))));
 }
 
-// One item, not nineteen. The file list this replaced could say "9 tệp" and never say whether any
-// of them proved anything — the report is the only artefact that ties each file to a requirement,
-// so it is the only artefact this column shows. A ticket with attachments but no report is not
-// "has evidence": it is a submission nobody has written up, and it reads that way.
 function evidenceCell(t) {
   const items = Array.isArray(t.evidence) ? t.evidence : [];
   const report = items.find((e) => e && e.body && e.body.results);
