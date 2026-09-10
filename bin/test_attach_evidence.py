@@ -204,7 +204,7 @@ def test_attach_evidence_apply_comments_on_the_pr_when_given():
         read_pat=lambda org=None, path=None: FAKE_PAT,
         upload=lambda file_path, **kw: "https://x/attachments/1",
         link=lambda *a, **k: None,
-        comment=lambda pr, body: calls.append((pr, body)),
+        comment=lambda pr, body, **kw: calls.append((pr, body)),
     )
     assert len(calls) == 1
     pr, body = calls[0]
@@ -292,3 +292,51 @@ def _ok(stdout):
 def _fail(code, stderr):
     import subprocess
     return subprocess.CompletedProcess(["curl"], code, "", stderr)
+
+
+# ---------------------------------------------------------------------------
+# The PR lives in the repo the evidence came out of — not in whatever directory the
+# manager happened to run this from. First real use failed exactly here: run from the
+# board's own repo, `gh pr comment 733` resolved against the wrong project and the
+# ticket ended up with its evidence while the PR got nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_the_pr_comment_runs_in_the_repo_the_evidence_file_came_from(tmp_path):
+    from attach_evidence import comment_on_pr
+
+    worktree = tmp_path / "some-repo" / "evidence"
+    worktree.mkdir(parents=True)
+    shot = worktree / "run.txt"
+    shot.write_text("proof")
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        class R:
+            returncode = 0
+            stderr = ""
+        return R()
+
+    comment_on_pr(733, "body", run=fake_run, cwd=str(worktree))
+    assert seen["cwd"] == str(worktree), "gh ran outside the evidence file's repo"
+
+
+def test_attach_evidence_hands_the_files_directory_to_the_comment_step(tmp_path):
+    """End to end: the caller must not have to remember to pass a cwd."""
+    from attach_evidence import attach_evidence
+
+    shot = tmp_path / "run.txt"
+    shot.write_text("proof")
+    seen = {}
+
+    def fake_comment(pr, body, **kwargs):
+        seen.update(kwargs)
+
+    attach_evidence(
+        8382, str(shot), pr=733, dry_run=False,
+        read_pat=lambda *a, **k: "pat", upload=lambda *a, **k: "https://att/1",
+        link=lambda *a, **k: None, comment=fake_comment,
+    )
+    assert seen.get("cwd") == str(tmp_path)

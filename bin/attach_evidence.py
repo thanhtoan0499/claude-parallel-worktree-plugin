@@ -23,6 +23,7 @@ required to actually upload/link/comment.
 import configparser
 import json
 import os
+import pathlib
 import subprocess
 from urllib.parse import quote
 
@@ -78,9 +79,16 @@ def link_attachment(ticket, attachment_url: str, note: str | None, *,
         raise RuntimeError(f"curl link exited {result.returncode}: {(result.stderr or '').strip()[:300]}")
 
 
-def comment_on_pr(pr, body: str, run=subprocess.run) -> None:
-    """`gh pr comment` — so a reviewer sees the proof without leaving the PR."""
-    result = run(["gh", "pr", "comment", str(pr), "--body", body], capture_output=True, text=True, timeout=30)
+def comment_on_pr(pr, body: str, run=subprocess.run, cwd: str | None = None) -> None:
+    """`gh pr comment` — so a reviewer sees the proof without leaving the PR.
+
+    `cwd` is the evidence file's own directory, because `gh` resolves a PR number against the
+    repo it is standing in. Run from anywhere else — this board's repo, say — and a valid PR
+    number resolves against the wrong project and fails, leaving the ticket holding evidence the
+    PR never hears about (which is what happened the first time this ran for real, AB#8382).
+    """
+    result = run(["gh", "pr", "comment", str(pr), "--body", body],
+                 capture_output=True, text=True, timeout=30, cwd=cwd)
     if result.returncode != 0:
         raise RuntimeError(f"gh pr comment exited {result.returncode}: {(result.stderr or '').strip()[:300]}")
 
@@ -110,7 +118,10 @@ def attach_evidence(ticket, file_path: str, pr=None, note: str | None = None, dr
     url = upload(file_path, org=org, project=project, pat=pat)
     link(ticket, url, note, org=org, project=project, pat=pat)
     if pr:
-        comment(pr, _pr_comment_body(ticket, filename, url, note))
+        # The evidence file's own directory: `gh` needs to be standing in the repo the PR
+        # belongs to, and that is the only repo the file could have come out of.
+        comment(pr, _pr_comment_body(ticket, filename, url, note),
+                cwd=str(pathlib.Path(file_path).resolve().parent))
     print(f"attach_evidence: attached {filename} to AB#{ticket}: {url}")
     return {"ticket": str(ticket), "file": filename, "pr": str(pr) if pr else None,
             "applied": True, "url": url}
