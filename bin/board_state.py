@@ -1007,7 +1007,13 @@ def _shape_evidence(raw) -> list[dict]:
     controls.
     """
     return [
-        {"name": item.get("name") or "", "url": item.get("url") or "", "created": item.get("created")}
+        {"name": item.get("name") or "", "url": item.get("url") or "", "created": item.get("created"),
+         # Only ever set on the verification report — dashboard._attach_report_body() downloads
+         # that one attachment and parses it, because the board cannot link to a report (ADO
+         # serves an .html attachment as a download whatever query string you hand it) and the
+         # evidence column now shows the report INSTEAD of the file list. Absent on every other
+         # attachment, which stays a plain link.
+         **({"body": item["body"]} if isinstance(item.get("body"), dict) and item["body"].get("results") else {})}
         for item in raw or []
         if isinstance(item, dict)
     ]

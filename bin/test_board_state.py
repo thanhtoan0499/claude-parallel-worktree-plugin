@@ -1747,7 +1747,14 @@ def test_board_html_uses_no_dom_apis_the_artifact_sandbox_forbids():
     """Every one of these fails silently in the artifact sandbox rather than throwing, so a
     single slip would blank a section with no error anywhere. The page builds DOM through h()."""
     html = _board_html()
-    for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+    # Property ACCESS, not the bare word: the page now carries comments naming innerHTML to
+    # explain why the report ships as data rather than markup, and a substring match would turn
+    # the explanation of the rule into a violation of it. Bracket access is checked too, since
+    # that is the one way to reach the property without a dot.
+    for prop in ("innerHTML", "outerHTML", "insertAdjacentHTML"):
+        for banned in (f".{prop}", f'["{prop}"', f"['{prop}'"):
+            assert banned not in html, f"board.html must not use {prop}"
+    for banned in ("document.write", "eval("):
         assert banned not in html, f"board.html must not use {banned}"
 
 
@@ -4704,17 +4711,53 @@ def test_evidence_cell_reads_evidence_drift_rather_than_recomputing_it():
     assert "evidenceDrift(" in src
 
 
-def test_evidence_cell_links_straight_to_the_attachment_opening_a_new_tab():
-    src = _evidence_cell_source()
-    assert re.search(r'target:\s*"_blank"', src)
-    assert re.search(r'rel:\s*"noopener"', src)
-    assert re.search(r"href", src)
-    assert re.search(r"\.url\b", src), "the anchor is never built from the attachment's own url"
 
 
-def test_evidence_cell_shows_the_count_when_there_is_more_than_one():
+def test_the_evidence_column_shows_the_report_and_nothing_else():
+    """The file list this replaced could say "9 tệp" and never say whether any of them proved
+    anything. One report, or an honest statement that there is none."""
     src = _evidence_cell_source()
-    assert re.search(r"\.length\s*>\s*1", src), "no branch renders a count for more than one attachment"
+    assert "reportNode(" in src, "the cell never renders the report"
+    assert "chưa có báo cáo" in src, "a ticket with files but no report reads as if it had evidence"
+    assert ".chip" not in src and "tệp nữa" not in src, "the old file list is still being built"
+
+
+def test_the_report_opens_in_place_rather_than_linking_out():
+    """ADO answers an .html attachment with content-disposition: attachment whatever query string
+    it is handed (measured 2026-09-10), so a link would download a file instead of showing a
+    report. collapsedGroup() is the page's one collapse control."""
+    assert "collapsedGroup(" in _evidence_cell_source()
+
+
+def test_the_report_is_built_through_h_not_innerhtml():
+    """Assigning innerHTML fails SILENTLY in the artifact sandbox — the report would be a blank
+    cell with no error anywhere. That is why the mirror ships data, not markup."""
+    src = _board_html_text()
+    fn = re.search(r"function reportNode\(.*?\n\}\n", src, re.S)
+    assert fn, "reportNode() not found"
+    assert "innerHTML" not in fn.group(0)
+    assert 'h("table"' in fn.group(0), "the results table is not built through h()"
+
+
+def test_report_screenshots_are_embedded_not_fetched_from_ado():
+    """The sandbox blocks off-allowlist image hosts, and a cross-site ADO request would not carry
+    the session cookie either — a remote src renders an empty box with no error."""
+    src = _board_html_text()
+    fn = re.search(r"function reportEvidence\(.*?\n\}\n", src, re.S)
+    assert fn, "reportEvidence() not found"
+    assert "e.src" in fn.group(0), "the screenshot never comes from the embedded data URI"
+    assert "dev.azure.com" not in fn.group(0)
+
+
+def test_every_report_verdict_word_has_a_tone():
+    """A verdict the map does not know renders untoned, which reads as neutral — the one thing a
+    failing verdict must never look like."""
+    from evidence_report import VERDICTS
+
+    tone = re.search(r"const REPORT_TONE = \{(.*?)\};", _board_html_text(), re.S)
+    assert tone, "REPORT_TONE not found"
+    for verdict in VERDICTS:
+        assert '"' + verdict + '"' in tone.group(1), "no tone for " + repr(verdict)
 
 
 def test_evidence_column_sits_after_summary_and_before_pr():
@@ -4733,17 +4776,6 @@ def test_evidence_column_sits_after_summary_and_before_pr():
     assert header.index('"Tóm tắt"') < header.index('"Bằng chứng"') < header.index('"PR"')
 
 
-def test_a_long_attachment_name_cannot_widen_the_backlog_table():
-    """Was: the cell got its own sideways scrollbar. That traded a wide table for a control the
-    reader has to notice, aim at and drag once per row — so the cell truncates instead, and this
-    still asserts the thing that actually mattered: one long name cannot push the column."""
-    src = _board_html_text()
-    block = re.search(r"\.evidence-list\s*\{([^}]*)\}", src)
-    assert block, ".evidence-list rule not found"
-    assert "max-width" in block.group(1), "nothing bounds the evidence column's width"
-    chip = re.search(r"\.evidence-list\s+\.chip\s*\{([^}]*)\}", src)
-    assert chip and "hidden" in chip.group(1), "a long filename is not clipped"
-
 
 # ---------------------------------------------------------------------------
 # The evidence cell as a list, not a scroller. Shipped as a 220px horizontal-overflow
@@ -4759,32 +4791,7 @@ def _board_html_text():
     return (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
 
 
-def test_the_evidence_list_stacks_its_files_instead_of_scrolling_sideways():
-    src = _board_html_text()
-    block = re.search(r"\.evidence-list\s*\{([^}]*)\}", src)
-    assert block, ".evidence-list rule not found"
-    rule = block.group(1)
-    assert "overflow-x: auto" not in rule, "the cell still hides files behind a sideways scroll"
-    assert "column" in rule, "files are not stacked one per line"
 
-
-def test_a_long_attachment_name_is_truncated_rather_than_widening_the_column():
-    src = _board_html_text()
-    block = re.search(r"\.evidence-list\s+\.chip\s*\{([^}]*)\}", src)
-    assert block, ".evidence-list .chip rule not found"
-    rule = block.group(1)
-    assert "ellipsis" in rule, "a long filename is not truncated"
-    assert "max-width" in rule, "nothing bounds how wide one filename may push the column"
-
-
-def test_every_evidence_chip_carries_its_full_name_for_hover():
-    """Truncation only works if the full name is still reachable — otherwise the column trades
-    one unreadable state for another."""
-    src = _board_html_text()
-    fn = re.search(r"function evidenceCell\(.*?\n\}\n", src, re.S)
-    assert fn, "evidenceCell() not found"
-    assert re.search(r"\btitle\b", fn.group(0)), "no hover title on the evidence chips"
-    assert "e.name" in fn.group(0)
 
 
 # ---------------------------------------------------------------------------
@@ -4848,11 +4855,3 @@ def test_a_non_http_url_yields_no_link_at_all_rather_than_a_broken_one():
     assert out == "null", out
 
 
-def test_the_overflow_line_opens_the_rest_instead_of_only_counting_them():
-    """"+4 tệp nữa" that cannot be clicked tells the reader something is hidden and gives them
-    no way to see it — worse than not mentioning it."""
-    src = _board_html_text()
-    fn = re.search(r"function evidenceCell\(.*?\n\}\n", src, re.S)
-    assert fn, "evidenceCell() not found"
-    body = fn.group(0)
-    assert "onclick" in body or "details" in body, "the overflow line is inert"

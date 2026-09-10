@@ -525,7 +525,43 @@ def get_ado_attachments(ids: list[str]) -> dict[str, list[dict]]:
                 "url": rel.get("url") or "",
                 "created": attrs.get("resourceCreatedDate"),
             })
+    for wid, rows in attachments.items():
+        _attach_report_body(rows, pat)
     return attachments
+
+
+# Written by evidence_report.py, one per ticket. The board's evidence column shows THIS and
+# nothing else — the file list it replaced answered "are there attachments" and never "do they
+# prove anything".
+# The .json twin, not the .html: the board builds the report with its own h() helper. Assigning
+# innerHTML fails silently inside the artifact sandbox, so handing the page markup would leave a
+# blank cell and no error anywhere.
+_REPORT_NAME_RE = re.compile(r"^report-AB\d+\.json$", re.IGNORECASE)
+
+
+def _attach_report_body(rows: list[dict], pat: str) -> None:
+    """Download the ticket's verification report and hang it, parsed, off its own attachment row.
+
+    Best-effort per ticket: a report that will not download or will not parse leaves the row
+    exactly as it was, and the evidence column falls back to saying no report exists. One bad
+    attachment must not cost the whole board its evidence data.
+    """
+    row = next((r for r in rows if _REPORT_NAME_RE.match(r.get("name") or "")), None)
+    if not row or not row.get("url"):
+        return
+    sep = "&" if "?" in row["url"] else "?"
+    result = subprocess.run(
+        ["curl", "-sS", "-u", f":{pat}", f"{row['url']}{sep}fileName={row['name']}&download=false"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        return
+    if isinstance(report, dict) and report.get("results"):
+        row["body"] = report
 
 
 def _iteration_leaves(node: dict) -> list[dict]:

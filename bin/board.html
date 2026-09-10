@@ -317,18 +317,47 @@
      attachment name fill the cell and hide every sibling behind a scrollbar the reader has to
      notice, aim at and drag — once per row. Stacked and truncated, the count and the first
      names are readable without any interaction at all; the full name is one hover away. */
-  .evidence-list { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; max-width: 230px; }
-  .evidence-list .chip {
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    display: block;
-  }
-  .evidence-count { font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
-  /* The shared collapse control, sized for a table cell rather than a card. */
-  .evidence-list > details.collapsed-group { width: 100%; margin-top: 0; }
-  .evidence-list > details.collapsed-group > summary {
-    font-size: var(--fs-xs); font-weight: 500; color: var(--faint); padding: 1px 0; gap: 3px;
-  }
-  .evidence-list > details.collapsed-group > .chip { margin-top: 3px; }
+  /* The report is the cell. It needs room the old three-chips-and-a-count list never did. */
+  .evidence-cell > details.collapsed-group { width: 100%; margin-top: 0; }
+  .evidence-cell > details.collapsed-group > summary { font-size: 12px; font-weight: 600; }
+  .rpt { max-height: 70vh; overflow-y: auto; margin-top: 8px; padding: 14px 16px 18px;
+    border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); font-size: 13px;
+    line-height: 1.55; max-width: 620px; }
+  .rpt h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint);
+    margin: 20px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--border-soft); font-weight: 600; }
+  .rpt h4:first-of-type { margin-top: 14px; }
+  .rpt .rpt-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11.5px;
+    color: var(--faint); }
+  .rpt .rpt-meta b { color: var(--ink); font-weight: 600; }
+  .rpt blockquote { margin: 0 0 8px; padding: 8px 12px; border-left: 3px solid var(--accent);
+    background: var(--surface); font-size: 12.5px; }
+  .rpt .rpt-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .rpt .rpt-table td { padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border-soft);
+    vertical-align: top; }
+  .rpt td.rpt-req { width: 32%; font-weight: 600; }
+  .rpt td.rpt-code { font-family: var(--font-mono); font-weight: 600; width: 58px; }
+  .rpt .rpt-v { display: inline-block; padding: 1px 7px; border-radius: 20px; font-size: 11px;
+    font-weight: 600; white-space: nowrap; }
+  .rpt .rpt-v.ok { background: var(--good-soft); color: var(--good-ink); }
+  .rpt .rpt-v.warn { background: var(--warn-soft); color: var(--warn-ink); }
+  .rpt .rpt-v.bad { background: var(--bad-soft); color: var(--bad-ink); }
+  .rpt ul.rpt-ev { margin: 0; padding: 0; list-style: none; }
+  .rpt ul.rpt-ev li { margin-bottom: 8px; }
+  .rpt ul.rpt-ev li:last-child { margin-bottom: 0; }
+  .rpt ul.rpt-ev a, .rpt ul.rpt-ev code { font-family: var(--font-mono); font-size: 11px; }
+  .rpt .rpt-what { color: var(--faint); font-size: 12px; margin-top: 2px; }
+  .rpt ul.rpt-plain { margin: 4px 0; padding-left: 17px; }
+  .rpt ul.rpt-plain li { margin-bottom: 5px; }
+  .rpt pre { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 6px;
+    padding: 9px 11px; overflow-x: auto; font-size: 11px; line-height: 1.5; margin: 5px 0 0;
+    white-space: pre; }
+  .rpt .rpt-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .rpt .rpt-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+  .rpt .rpt-lbl.bad { color: var(--bad-ink); } .rpt .rpt-lbl.ok { color: var(--good-ink); }
+  .rpt figure { margin: 10px 0 0; }
+  .rpt figure img { width: 100%; border: 1px solid var(--border-soft); border-radius: 6px; display: block; }
+  .rpt figcaption { color: var(--faint); font-size: 11.5px; margin-top: 4px; }
+  @media (max-width: 900px) { .rpt .rpt-cols { grid-template-columns: 1fr; } }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1241,37 +1270,97 @@ function evidenceHref(url, name) {
   return safe + sep + "fileName=" + encodeURIComponent(name || "file") + "&download=false";
 }
 
+const REPORT_TONE = { "đạt": "ok", "đạt một phần": "warn", "chưa chứng minh": "warn", "không đạt": "bad" };
+
+function reportEvidence(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const files = list.filter((e) => e && !e.src);
+  const shots = list.filter((e) => e && e.src);
+  return [
+    files.length
+      ? h("ul", { class: "rpt-ev" }, files.map((e) =>
+          h("li", {},
+            e.href
+              ? h("a", { href: safeHref(e.href), target: "_blank", rel: "noopener" }, e.file)
+              : h("code", {}, e.file),
+            h("div", { class: "rpt-what" }, e.proves || ""))))
+      : null,
+    // The screenshot travels inside the report as a data: URI. The artifact sandbox blocks images
+    // from off-allowlist hosts, and an ADO url would not carry the session cookie cross-site
+    // either — so a remote src would render an empty box with no error.
+    shots.map((e) => h("figure", {},
+      h("img", { src: e.src, alt: e.proves || e.file }),
+      h("figcaption", {}, e.proves || ""))),
+  ];
+}
+
+function reportSection(title, ...body) {
+  return body.flat(Infinity).some((x) => x) ? [h("h4", {}, title), ...body] : null;
+}
+
+// The report, built the same way every other part of this page is built. It arrives as data
+// (dashboard._attach_report_body) rather than markup because assigning innerHTML fails SILENTLY
+// in the artifact sandbox — a blank cell, no error, nobody the wiser.
+function reportNode(r) {
+  const meta = [["PR", r.pr && "#" + r.pr], ["Commit", r.commit], ["Người chạy", r.run_by],
+                ["Lúc", r.run_at], ["Môi trường", r.env]]
+    .filter(([, v]) => v)
+    .map(([k, v]) => h("span", {}, h("b", {}, k + " "), String(v)));
+
+  const req = r.requirement || {};
+  const rows = (r.results || []).map((x) => h("tr", {},
+    h("td", { class: "rpt-req" }, x.req),
+    h("td", {}, h("span", { class: "rpt-v " + (REPORT_TONE[x.verdict] || "warn") }, x.verdict)),
+    h("td", {}, reportEvidence(x.evidence), x.note ? h("div", { class: "rpt-what" }, x.note) : null)));
+
+  const rg = r.red_green || {};
+  const ck = (r.checklist_text ? Object.keys(r.checklist_text) : []).map((key) => {
+    const val = (r.checklist || {})[key];
+    const done = val === true;
+    return h("tr", {},
+      h("td", { class: "rpt-code" }, key),
+      h("td", {}, r.checklist_text[key]),
+      h("td", {}, h("span", { class: "rpt-v " + (done ? "ok" : "warn") }, done ? "xong" : "chưa")),
+      h("td", { class: "rpt-what" }, done ? "" : String(val || "")));
+  });
+
+  return h("div", { class: "rpt" },
+    h("div", { class: "rpt-meta" }, meta),
+    reportSection("Vé yêu cầu gì",
+      req.text ? h("blockquote", {}, req.source ? h("b", {}, req.source + " — ") : null, req.text) : null,
+      reportEvidence(req.evidence)),
+    reportSection("Đã sửa gì",
+      (r.changed || []).length ? h("ul", { class: "rpt-plain" }, (r.changed || []).map((c) => h("li", {}, c))) : null),
+    h("h4", {}, "Kết quả"),
+    h("table", { class: "rpt-table" }, h("tbody", {}, rows)),
+    reportSection("Gỡ thay đổi ra thì test đỏ",
+      rg.how ? h("div", { class: "rpt-what" }, rg.how) : null,
+      rg.red && rg.green
+        ? h("div", { class: "rpt-cols" },
+            h("div", {}, h("div", { class: "rpt-lbl bad" }, "đã gỡ"), h("pre", {}, rg.red)),
+            h("div", {}, h("div", { class: "rpt-lbl ok" }, "khôi phục"), h("pre", {}, rg.green)))
+        : null),
+    reportSection("Còn vướng · cần quyết",
+      (r.blockers || []).length
+        ? h("ul", { class: "rpt-plain" }, (r.blockers || []).map((b) => h("li", {}, b)))
+        : null),
+    h("h4", {}, "Checklist DoD"),
+    h("table", { class: "rpt-table" }, h("tbody", {}, ck)));
+}
+
+// One item, not nineteen. The file list this replaced could say "9 tệp" and never say whether any
+// of them proved anything — the report is the only artefact that ties each file to a requirement,
+// so it is the only artefact this column shows. A ticket with attachments but no report is not
+// "has evidence": it is a submission nobody has written up, and it reads that way.
 function evidenceCell(t) {
   const items = Array.isArray(t.evidence) ? t.evidence : [];
+  const report = items.find((e) => e && e.body && e.body.results);
+  if (report) return collapsedGroup("📋 Báo cáo", [reportNode(report.body)]);
   const drift = evidenceDrift(t, items, t.pr);
   if (drift === "missing") return pill("pill-bad", "chưa có bằng chứng");
   if (drift === "stale") return pill("pill-warn", "bằng chứng cũ hơn bản sửa");
   if (!items.length) return "—";
-  // Nineteen files on one row is a wall, not a list. Show the first few and say how many are
-  // left — the ticket itself is one click away for the rest, and this column's job is to answer
-  // "is there proof" at a glance, not to be a file manager.
-  const SHOWN = 3;
-  const chipFor = (e) => {
-    const label = e.name || "(không tên)";
-    // The full name on hover — truncation only works while the whole name stays reachable.
-    const title = e.created ? label + " · " + e.created : label;
-    const href = evidenceHref(e.url, label);
-    return href
-      ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title }, label)
-      : h("span", { class: "chip", title }, label);
-  };
-  const rest = items.slice(SHOWN);
-  return h(
-    "div", { class: "evidence-list" },
-    items.length > 1 ? h("span", { class: "evidence-count" }, items.length + " tệp") : null,
-    items.slice(0, SHOWN).map(chipFor),
-    // A bare "+4 tệp nữa" says something is hidden and offers no way to reach it, which is worse
-    // than not mentioning it. <details> is the whole control — no state to keep, and it stays
-    // open per row as the board re-renders on the pump's tick.
-    // collapsedGroup() is the page's one collapse mechanism — a second hand-rolled toggle here
-    // would style and behave differently for no gain. It is only sized down for this cell.
-    rest.length ? collapsedGroup("+" + rest.length + " tệp nữa", rest.map(chipFor)) : null,
-  );
+  return pill("pill-warn", "chưa có báo cáo · " + items.length + " tệp");
 }
 function ticketPrChip(pr) {
   if (!pr) return null;
@@ -1312,7 +1401,7 @@ function ticketRow(t, opts) {
           title: "Xem card đang chạy việc này", onclick: () => jumpToAssignment(claimant.id),
         }, summary)
       : summary),
-    h("td", {}, evidenceCell(t)),
+    h("td", { class: "evidence-cell" }, evidenceCell(t)),
     h("td", {}, t.sprint || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
   ];
