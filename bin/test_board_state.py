@@ -4187,6 +4187,105 @@ def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
 
 
 
+# ---------------------------------------------------------------------------
+# evidenceDrift() — BRIEF-EVIDENCE-2.md Part 2. Pure, JS-only (its inputs — t.evidence, t.pr,
+# t.state — are all already on the published ticket doc, so there is nothing here a server-side
+# computation would add). "missing" and "stale" must read as different problems: this is exactly
+# how AB#6541 escaped QC for 14 days — screenshots dated before the fix does not prove the fix.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_prelude():
+    script = _board_html_script()
+    return _js_const("EVIDENCE_OWED_STATES", script) + "\n" + _js_function("evidenceDrift", script)
+
+
+def test_new_active_and_blocked_owe_nothing_regardless_of_evidence():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "New" }, [], null),
+          evidenceDrift({ state: "Active" }, [], null),
+          evidenceDrift({ state: "Blocked" }, [], null),
+        ]));
+        """
+    )
+    assert out == "[null,null,null]", out
+
+
+def test_zero_attachments_in_an_owed_state_is_missing():
+    for state in ("Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"):
+        out = _run_node(_evidence_prelude() + f'console.log(evidenceDrift({{state: "{state}"}}, [], null));')
+        assert out == "missing", state
+
+
+def test_having_any_evidence_with_no_pr_to_compare_against_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift({ state: "Resolved" },
+          [{ name: "x.png", url: "u", created: "2026-08-20T00:00:00Z" }], null));
+        """
+    )
+    assert out == "null", out
+
+
+def test_todays_real_case_6541_evidence_older_than_the_merge_is_stale():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "verify-goal-verbfirst.png", url: "u", created: "2026-08-25T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "stale", out
+
+
+def test_evidence_newer_than_the_merge_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "after-fix.png", url: "u", created: "2026-08-27T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_the_newest_attachment_is_what_gets_compared_against_the_merge_date():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" },
+           { name: "new.png", url: "u", created: "2026-08-27T00:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_missing_and_stale_are_told_apart():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "Resolved" }, [], { mergedAt: "2026-08-26T09:00:00Z" }),
+          evidenceDrift({ state: "Resolved" },
+            [{ name: "x.png", url: "u", created: "2026-08-01T00:00:00Z" }],
+            { mergedAt: "2026-08-26T09:00:00Z" }),
+        ]));
+        """
+    )
+    assert out == '["missing","stale"]', out
+
+
 def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
