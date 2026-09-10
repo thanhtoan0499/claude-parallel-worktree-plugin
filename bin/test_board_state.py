@@ -4419,9 +4419,10 @@ def _summary_prelude():
     parts = [
         _js_const("STEP_STATE_LABEL", script),
         _js_const("SUMMARY_BLOCKER", script),
+        _js_const("EVIDENCE_OWED_STATES", script),
     ]
     parts += [_js_function(name, script) for name in
-              ("assignmentForTicket", "stepState", "planSteps", "ticketSummary")]
+              ("assignmentForTicket", "stepState", "planSteps", "evidenceDrift", "ticketSummary")]
     return "\n".join(parts)
 
 
@@ -4490,16 +4491,81 @@ def test_ticket_summary_says_nobody_has_it_rather_than_leaving_the_cell_empty():
 
 
 def test_ticket_summary_of_a_finished_ticket_claims_nothing_is_left_to_chase():
-    """derived_status null is a real answer — printing a chase phrase there invites wasted work."""
+    """derived_status null is a real answer — printing a chase phrase there invites wasted work.
+    Evidence is fresh here on purpose: a Closed ticket is exactly one EVIDENCE_OWED_STATES covers,
+    so this fixture must actually be verified or the next test's CHƯA VERIFY would be meaningless."""
     out = _run_node(
         _summary_prelude()
         + """
         console.log(ticketSummary(
           { id: "100", state: "Closed", derived_status: null,
-            pr: { number: 700, state: "MERGED" } }, []));
+            pr: { number: 700, state: "MERGED", mergedAt: "2026-08-01T00:00:00Z" },
+            evidence: [{ name: "shot.png", url: "u", created: "2026-08-02T00:00:00Z" }] }, []));
         """
     )
     assert out == "xong", out
+
+
+# ---------------------------------------------------------------------------
+# ticketSummary()'s third clause (BRIEF-EVIDENCE-2.md Part 4) — reads evidenceDrift() directly,
+# never recomputes it, so this line and the "Bằng chứng" column can never disagree.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_brief_example_a_verified_missing_ticket_gets_chua_verify():
+    """The brief's own worked example, verbatim: "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY"."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "running",
+          plan: [{step:"a",state:"done"},{step:"b",state:"done"},{step:"c",state:"done"}] }];
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" }, evidence: [] },
+          assignments));
+        """
+    )
+    assert out == "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY", out
+
+
+def test_ticket_summary_flags_stale_evidence_the_same_way_as_missing():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" }] }, []));
+        """
+    )
+    assert out.endswith(" · CHƯA VERIFY"), out
+
+
+def test_ticket_summary_adds_nothing_when_the_ticket_does_not_owe_evidence():
+    """Not owed means not owed — no suffix, not even an empty one, for a ticket still in flight."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "waiting_review",
+            pr: { number: 732, state: "OPEN" } }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+
+
+def test_ticket_summary_adds_nothing_once_evidence_is_fresh():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "after.png", url: "u", created: "2026-08-27T00:00:00Z" }] }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+    assert out == "code đã merge · chờ QC xác nhận", out
 
 
 def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():

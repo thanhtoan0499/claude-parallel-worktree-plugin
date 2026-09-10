@@ -1154,10 +1154,17 @@ function ticketSummary(t, assignments) {
     return String(claimant.note).trim();
   }
 
+  // Third clause (BRIEF-EVIDENCE-2.md Part 4), on every path below — including "xong": a Closed
+  // ticket with nothing left to chase is exactly the shape EVIDENCE_OWED_STATES covers, so
+  // "hết việc" and "verified" must not be allowed to look like the same claim. Reads
+  // evidenceDrift() directly rather than recomputing it, so this line and the "Bằng chứng"
+  // column can never disagree about the same ticket.
+  const needsVerify = evidenceDrift(t, t.evidence, t.pr) ? " · CHƯA VERIFY" : "";
+
   const blocker = t.derived_status ? SUMMARY_BLOCKER[t.derived_status] || t.derived_status : null;
   // Nothing left to chase. "xong" is a claim the row can stand behind: derived_status is null
   // only when the ticket is done AND its PR merged (see ticket_status in board_state.py).
-  if (!blocker) return "xong";
+  if (!blocker) return "xong" + needsVerify;
 
   // The PR number belongs to whoever has to open it, so it rides along with the review/merge ask
   // rather than sitting in a column of its own repeating the same number.
@@ -1174,7 +1181,7 @@ function ticketSummary(t, assignments) {
   } else if (t.pr && t.pr.state === "MERGED") {
     progress.push("code đã merge");
   }
-  return progress.length ? progress.join(" · ") + " · " + withPr : withPr;
+  return (progress.length ? progress.join(" · ") + " · " + withPr : withPr) + needsVerify;
 }
 
 // A Backlog row's "Chờ ai" cell jumps here: opens the assignment card's closed <details> and
