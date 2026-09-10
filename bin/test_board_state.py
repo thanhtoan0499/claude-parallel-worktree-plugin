@@ -2174,9 +2174,13 @@ def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
 def test_board_renders_an_assignments_section_in_the_main_render_path():
     script = _board_html_script()
     assert re.search(r"function renderAssignments\(\)", script), "renderAssignments() not found"
-    call = re.search(r"board\.replaceChildren\((.*?)\);", script, re.S)
-    assert call, "render()'s replaceChildren call not found"
-    assert "renderAssignments()" in call.group(1), "assignments section missing from render()"
+    # Scoped to render()'s own body, and every branch of it: the report route added a second
+    # replaceChildren call, and matching only the first one silently stopped checking the board.
+    body = re.search(r"function render\(\) \{.*?\n\}\n", script, re.S)
+    assert body, "render() not found"
+    calls = re.findall(r"board\.replaceChildren\((.*?)\);", body.group(0), re.S)
+    assert calls, "render()'s replaceChildren call not found"
+    assert any("renderAssignments()" in c for c in calls), "assignments section missing from render()"
 
 
 def test_board_subscribes_to_the_assignments_collection():
@@ -4715,18 +4719,30 @@ def test_evidence_cell_reads_evidence_drift_rather_than_recomputing_it():
 
 def test_the_evidence_column_shows_the_report_and_nothing_else():
     """The file list this replaced could say "9 tệp" and never say whether any of them proved
-    anything. One report, or an honest statement that there is none."""
+    anything. One way in, or an honest statement that there is nothing to open."""
     src = _evidence_cell_source()
-    assert "reportNode(" in src, "the cell never renders the report"
+    assert "REPORT_ROUTE" in src, "the cell never links to the report"
     assert "chưa có báo cáo" in src, "a ticket with files but no report reads as if it had evidence"
     assert ".chip" not in src and "tệp nữa" not in src, "the old file list is still being built"
 
 
-def test_the_report_opens_in_place_rather_than_linking_out():
-    """ADO answers an .html attachment with content-disposition: attachment whatever query string
-    it is handed (measured 2026-09-10), so a link would download a file instead of showing a
-    report. collapsedGroup() is the page's one collapse control."""
-    assert "collapsedGroup(" in _evidence_cell_source()
+def test_the_report_opens_on_its_own_page_not_inside_the_cell():
+    """A verification report is something you sit and read. Collapsed into one cell of a twenty-row
+    table it is unreadable, which is what this route replaced — and a hash means the back button
+    works and the URL can be pasted to someone."""
+    src = _board_html_text()
+    assert 'const REPORT_ROUTE = "#bao-cao/"' in src
+    assert "collapsedGroup(" not in _evidence_cell_source(), "the report is still collapsed in the cell"
+    assert re.search(r"function renderReportPage\(", src), "there is no report page to open"
+    assert 'addEventListener("hashchange"' in src, "back/forward would not re-render"
+
+
+def test_the_report_page_says_so_when_there_is_nothing_to_show():
+    """A pasted link to a ticket whose report has not synced yet must not render a blank panel."""
+    fn = re.search(r"function renderReportPage\(.*?\n\}\n", _board_html_text(), re.S)
+    assert fn, "renderReportPage() not found"
+    assert "Chưa có báo cáo" in fn.group(0)
+    assert "report-back" in fn.group(0), "no way back to the board"
 
 
 def test_the_report_is_built_through_h_not_innerhtml():

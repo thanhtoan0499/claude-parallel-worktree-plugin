@@ -369,10 +369,16 @@ overflow-x:auto;font-size:11.5px;line-height:1.5;margin:6px 0 0;color:var(--fg);
 .rpt a{color:var(--acc)}.rpt p{margin:8px 0}
 .rpt ul.plain{margin:6px 0;padding-left:19px}.rpt ul.plain li{margin-bottom:6px}
   /* == end report css == */
-  /* Board-only: the report lives inside a table cell, so it is boxed and scrolls on its own. */
-  .evidence-cell .rpt { max-height: 70vh; overflow-y: auto; margin-top: 8px; max-width: 640px;
-    border: 1px solid var(--border-soft); border-radius: var(--radius-m); }
-  .evidence-cell .rpt main { padding: 16px 18px 22px; }
+  /* Board-only: the report has its own page (#bao-cao/<id>), so it just needs a surface. It is
+     never boxed or collapsed — cramming a verification report into one table cell is what this
+     route replaced. */
+  .rpt { background: var(--surface); border: 1px solid var(--border-soft);
+    border-radius: var(--radius-m); box-shadow: var(--shadow); }
+  .report-nav { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    font-size: var(--fs-sm); margin-bottom: 12px; }
+  .report-back { font-weight: 600; }
+  a.report-open { text-decoration: none; }
+  a.report-open:hover { background: var(--accent); color: var(--accent-ink); }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1376,16 +1382,53 @@ function reportNode(r) {
     h("table", {}, h("tbody", {}, ck))));
 }
 
+// The route a report opens at. A hash, not a modal: the back button works, the URL is copyable,
+// and the report gets the whole page instead of a table cell it never fitted in.
+const REPORT_ROUTE = "#bao-cao/";
+function reportTicketId() {
+  const hash = String(location.hash || "");
+  return hash.startsWith(REPORT_ROUTE) ? hash.slice(REPORT_ROUTE.length) : null;
+}
+function reportFor(id) {
+  const t = view.tickets.find((x) => String(x.id) === String(id));
+  const hit = (t && Array.isArray(t.evidence) ? t.evidence : []).find((e) => e && e.body && e.body.results);
+  return hit ? hit.body : null;
+}
+
+// One item, not nineteen. The file list this replaced could say "9 tệp" and never say whether any
+// of them proved anything — the report is the only artefact that ties each file to a requirement,
+// so it is the only artefact this column shows. A ticket with attachments but no report is not
+// "has evidence": it is a submission nobody has written up, and it reads that way.
 function evidenceCell(t) {
   const items = Array.isArray(t.evidence) ? t.evidence : [];
   const report = items.find((e) => e && e.body && e.body.results);
-  if (report) return collapsedGroup("📋 Báo cáo", [reportNode(report.body)]);
+  if (report) {
+    return h("a", { class: "pill pill-accent report-open", href: REPORT_ROUTE + t.id,
+      style: "text-decoration:none;" }, "📋 Mở báo cáo");
+  }
   const drift = evidenceDrift(t, items, t.pr);
   if (drift === "missing") return pill("pill-bad", "chưa có bằng chứng");
   if (drift === "stale") return pill("pill-warn", "bằng chứng cũ hơn bản sửa");
   if (!items.length) return "—";
   return pill("pill-warn", "chưa có báo cáo · " + items.length + " tệp");
 }
+
+// The report on its own page. Nothing else renders while this is open — a verification report is
+// something you sit and read, not something you squint at inside one cell of a twenty-row table.
+function renderReportPage(id) {
+  const r = reportFor(id);
+  const back = h("a", { class: "report-back", href: "#" }, "← quay lại bảng");
+  if (!r) {
+    return h("section", { class: "board-section" }, back,
+      errorNote("Chưa có báo cáo cho AB#" + id + " — vé chưa nộp, hoặc bảng chưa đồng bộ xong."));
+  }
+  const url = ticketUrl(id);
+  return h("section", { class: "board-section" },
+    h("div", { class: "report-nav" }, back,
+      url ? h("a", { href: url, target: "_blank", rel: "noopener" }, "mở vé AB#" + id + " trên ADO") : null),
+    reportNode(r));
+}
+
 function ticketPrChip(pr) {
   if (!pr) return null;
   const tone = pr.state === "MERGED" ? "pill-good" : pr.state === "OPEN" ? "pill-accent" : "pill-neutral";
@@ -1730,7 +1773,10 @@ function escalationsGoFirst(loaded, errored, escalations) {
 
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
-  if (board) {
+  const reportId = reportTicketId();
+  if (board && reportId) {
+    board.replaceChildren(renderReportPage(reportId));
+  } else if (board) {
     if (escalationsGoFirst(view.loaded.escalations, view.errors.escalations, view.escalations)) {
       board.replaceChildren(renderEscalations(), renderTickets(), renderAssignments());
     } else {
@@ -1746,6 +1792,9 @@ function render() { /* draw from `view`; called after every snapshot */
 // once connected — while db is unavailable the null-branch below owns #board, and re-running
 // render() here would silently overwrite that panel with the normal empty-state chrome.
 setInterval(() => { if (view.db) render(); }, 30000);
+// Back/forward and a pasted #bao-cao/<id> link both come through here. The route is read at
+// render time, so there is no second copy of "which page am I on" to keep in step.
+window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 
 (async () => {
   render();                                   // at rest, before any data
