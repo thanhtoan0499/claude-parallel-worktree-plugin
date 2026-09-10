@@ -284,10 +284,52 @@ writable — the account may lack permission to create them — so do not design
 **Verify the write landed.** An update issued inside a compound command that failed earlier never
 ran at all. Read the state back rather than assuming the call succeeded.
 
+**A done-ish state needs evidence attached, and evidence older than the fix proves nothing.**
+Resolved, QC-ready, Closed — each of those tells someone the work is real. A ticket that reaches
+one with zero attachments is an unbacked claim, and one whose newest attachment predates the last
+commit is worse: it looks checked. AB#6541 shipped that way — a verification screenshot from the
+day before the fix, and QC found the bug still present fourteen days later. Attach the proof to the
+ticket AND to the PR in one step, so a reviewer never has to leave the PR to find out whether
+anything was actually run.
+
+**When a state change hands work to someone else, write the hand-off in the same call.** A merged
+bug moving to a QC-ready state without an assignee lands in a queue with nobody's name on it,
+which is indistinguishable from not moving it at all. Two calls are worse than one: if the second
+fails, the ticket is now in a queue and unowned. Keep the ROLE the rule decides ("this is QC's
+now") separate from the PERSON who holds that role today, so a handover is one line of
+configuration and not an edit to the rule.
+
 **Match the states the item type actually allows.** Work item types differ — one may offer only
 New/Active/Blocked/Closed while another adds Resolved and QC-verification states. Read the allowed
 list rather than assuming, and prefer the state the rest of the team already uses for that
 situation over inventing your own convention.
+
+## A rule that never fires
+
+Automation you cannot see failing is worse than none: it buys the confidence of a check without
+the check. On 2026-09-10 the CTO asked why nothing on the board ever got caught. Three separate
+defects, all of the same shape, all invisible:
+
+- The state-drift rules keyed every decision on the work-item type. The query never asked ADO for
+  that field, so every real ticket reached the rules as type `""` and every rule returned "no
+  drift". The unit tests passed because they passed a type in themselves.
+- The function that packages a rule's result for publishing rebuilt the dictionary by hand and
+  forgot one key. The QC hand-off was decided correctly and dropped on the way out.
+- The first real run of the evidence tool called `gh pr comment` from whatever directory the
+  manager was standing in. `gh` resolves a PR number against the repo it is in, so the number
+  resolved against the wrong project; the ticket got its evidence and the PR silently got nothing.
+
+**Run it against production data before you call it done.** A green unit test proves the function
+is right about the inputs you handed it. It says nothing about whether those inputs ever arrive.
+Print what the rule actually decides on today's real rows and read the output — zero findings on a
+backlog you know is drifting is a bug report, not a clean bill of health.
+
+**Every hand-rebuilt dictionary drops a field eventually.** When one function repackages another's
+result, the test that matters asserts the whole shape survives, not that the one field you were
+thinking about did.
+
+**A tool that shells out to a repo-aware command needs to be told which repo.** Not the manager's
+cwd — the repo the work came out of.
 
 ## Routing work
 
