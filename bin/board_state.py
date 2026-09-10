@@ -764,6 +764,10 @@ def prs_by_ticket(prs: list[dict]) -> dict[str, dict]:
             # decision", not a decision, and it must not read as one.
             "review": pr.get("reviewDecision") or None,
             "checks": check_rollup(pr.get("statusCheckRollup")),
+            # board.html's evidenceDrift() needs this to tell "evidence taken before the fix"
+            # apart from "evidence proves this fix" — a ticket's linked commit date is not
+            # reachable at the same cost, so the PR's own merge date stands in for it.
+            "merged_at": pr.get("mergedAt"),
         }
         for ticket_id, pr in winners.items()
     }
@@ -809,6 +813,19 @@ def check_rollup(rollup) -> str | None:
 # one the localhost dashboard uses — kept here so ticket_status() can reason about it, with a test
 # that fails the moment the two copies disagree.
 TICKET_DONE_STATES = frozenset({"Closed", "Removed", "Done"})
+
+# States where a ticket could actually owe evidence — mirrored in board.html's own
+# EVIDENCE_OWED_STATES for evidenceDrift(), since that check runs client-side (see
+# BRIEF-EVIDENCE-2.md: it only needs `evidence`, `pr` and `state`, all already on the published
+# ticket doc). Kept here too because THIS is what bounds get_ado_attachments() to the tickets
+# that could actually need it — "đừng quét cả backlog".
+EVIDENCE_OWED_STATES = frozenset({"Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"})
+
+
+def _ids_owing_evidence(tickets: list[dict]) -> list[str]:
+    """Ticket ids worth spending an attachments fetch on — bounds get_ado_attachments() to the
+    handful of tickets that could actually owe evidence, not the whole backlog."""
+    return [str(t.get("id")) for t in tickets or [] if t.get("id") and (t.get("state") or "") in EVIDENCE_OWED_STATES]
 
 # Every derived status, in the precedence order ticket_status() applies them. The order IS the
 # argument, so it lives here rather than being implied by the shape of an if-chain:
@@ -951,8 +968,22 @@ def _state_drift_doc(state, work_item_type, derived_status, has_block_reason, pr
     return {"proposed_state": drift["proposed_state"], "reason": reason, "fixable": drift["fixable"]}
 
 
+def _shape_evidence(raw) -> list[dict]:
+    """Coerce dashboard.get_ado_attachments()'s raw per-ticket list into exactly what the page
+    needs — name/url/created — same tolerance as _safe_evidence()/_safe_plan(): a malformed
+    entry is dropped rather than raised on, since ADO's own shape is not a contract this file
+    controls.
+    """
+    return [
+        {"name": item.get("name") or "", "url": item.get("url") or "", "created": item.get("created")}
+        for item in raw or []
+        if isinstance(item, dict)
+    ]
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
-                assignment_refs=None, escalated_refs=None, blocked_reason_refs=None) -> dict[str, dict]:
+                assignment_refs=None, escalated_refs=None, blocked_reason_refs=None,
+                evidence_by_ticket=None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
@@ -991,6 +1022,10 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | Non
             # Published BESIDE state and derived_status, never instead of either — see
             # ticket_state_drift()'s docstring for the three contradictions this can name.
             "state_drift": _state_drift_doc(state, ticket.get("type") or "", derived_status, has_block_reason, pr),
+            # Only ever populated for tickets in EVIDENCE_OWED_STATES — see collect()'s
+            # _ids_owing_evidence() — so an empty list here means either "not owed" or "owed and
+            # genuinely has none"; board.html's evidenceDrift() tells those apart via `t.state`.
+            "evidence": _shape_evidence((evidence_by_ticket or {}).get(key)),
             "handed_off": ownership["handed_off"],
             "handed_off_to": ownership["handed_off_to"],
         }
@@ -1186,6 +1221,7 @@ def build_writes(
     owners=None,
     pump_period_s=None,
     claims=None,
+    evidence_by_ticket=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -1213,6 +1249,7 @@ def build_writes(
         assignment_refs=_assignment_refs(assignments_docs),
         escalated_refs=_escalated_refs(escalations_docs, registry),
         blocked_reason_refs=_blocked_reason_refs(assignments_docs),
+        evidence_by_ticket=evidence_by_ticket,
     )
     for collection, docs in (
         # The claim window is sized off the very cadence stamped onto meta/status below, so the
@@ -1282,6 +1319,7 @@ def collect(
     owners=None,
     read_timer_period=lambda: None,
     read_claims=lambda registry: {},
+    read_evidence=lambda ids: {},
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -1329,6 +1367,13 @@ def collect(
         # registry for the same reason `read_usage` does — the registry is what says where each
         # worker's worktree is, and reading it twice would let the two copies disagree.
         claims=_safe(lambda: read_claims(registry), {}, "claims"),
+        # Filtered to EVIDENCE_OWED_STATES BEFORE the reader ever runs — "đừng quét cả backlog" —
+        # so a ticket that could not possibly owe evidence never costs a fetch. {} on failure: a
+        # broken read degrades every evidence-owing ticket's `evidence` list to empty, the same
+        # shape as "checked, found nothing".
+        evidence_by_ticket=_safe(
+            lambda: read_evidence(_ids_owing_evidence(tickets or [])), {}, "evidence"
+        ),
     )
 
 
@@ -1463,6 +1508,7 @@ def main() -> int:
         owners=dashboard._ado_identities(),
         read_timer_period=read_timer_period,
         read_claims=read_worker_claims,
+        read_evidence=dashboard.get_ado_attachments,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

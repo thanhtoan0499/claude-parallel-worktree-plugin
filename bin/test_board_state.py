@@ -602,7 +602,7 @@ def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
     ]
 
     assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720",
-                              "review": None, "checks": None}}
+                              "review": None, "checks": None, "merged_at": None}}
 
 
 def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
@@ -621,7 +621,7 @@ def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
 
     assert set(docs) == {"8196", "8197"}
     assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100",
-                           "review": None, "checks": None}
+                           "review": None, "checks": None, "merged_at": None}
     assert docs["8197"] == docs["8196"]
 
 
@@ -2136,7 +2136,7 @@ def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatc
     writes = json.loads(capsys.readouterr().out)
     tickets = [w for w in writes if w["collection"] == "tickets"]
     assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu",
-                                       "review": None, "checks": None}
+                                       "review": None, "checks": None, "merged_at": None}
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
@@ -3724,6 +3724,128 @@ def test_build_writes_wires_the_ledger_note_check_onto_blocked_tickets():
     by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
     assert by_id["1"]["state_drift"] is None
     assert by_id["2"]["state_drift"]["fixable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Evidence (BRIEF-EVIDENCE-2.md) — get_ado_attachments() already exists; this wires it into
+# ticket_docs(), fetched only for tickets that could actually owe evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_owed_states_matches_the_brief():
+    from board_state import EVIDENCE_OWED_STATES
+
+    assert EVIDENCE_OWED_STATES == frozenset(
+        {"Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"}
+    )
+
+
+def test_ticket_docs_publish_evidence_beside_state():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8172", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8172": [
+            {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+        ]},
+    )
+    assert docs["8172"]["evidence"] == [
+        {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+    ]
+
+
+def test_ticket_docs_evidence_defaults_to_an_empty_list():
+    from board_state import ticket_docs
+
+    docs = ticket_docs([{"id": "1", "title": "x", "state": "Active"}], {})
+    assert docs["1"]["evidence"] == []
+
+
+def test_ticket_docs_evidence_is_empty_for_a_ticket_the_batch_never_mentioned():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8325", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8325": []},
+    )
+    assert docs["8325"]["evidence"] == []
+
+
+def test_ticket_docs_drops_a_malformed_evidence_entry_rather_than_raising():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"1": ["not a dict", {"name": "ok.png", "url": "u", "created": "c"}]},
+    )
+    assert docs["1"]["evidence"] == [{"name": "ok.png", "url": "u", "created": "c"}]
+
+
+def test_prs_by_ticket_carries_the_merge_date_for_evidence_freshness():
+    from board_state import prs_by_ticket
+
+    prs = [{"number": 700, "title": _pr_title("x", "1"), "state": "MERGED", "url": "u",
+            "mergedAt": "2026-08-26T09:00:00Z"}]
+    assert prs_by_ticket(prs)["1"]["merged_at"] == "2026-08-26T09:00:00Z"
+
+
+def test_build_writes_wires_evidence_onto_the_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "x", "state": "Resolved"}],
+        pr_by_ticket={}, now=1000.0,
+        evidence_by_ticket={"1": [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]},
+    )
+    doc = _writes_for(writes, "tickets")[0]["data"]
+    assert doc["evidence"] == [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]
+
+
+def test_collect_only_fetches_evidence_for_tickets_that_could_owe_it():
+    """Cost control per the brief: "đừng quét cả backlog" — New/Active/Blocked tickets never
+    even reach the evidence reader."""
+    from board_state import collect
+
+    seen_ids = []
+
+    def read_evidence(ids):
+        seen_ids.extend(ids)
+        return {i: [] for i in ids}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [
+            {"id": "1", "title": "a", "state": "New"},
+            {"id": "2", "title": "b", "state": "Active"},
+            {"id": "3", "title": "c", "state": "Blocked"},
+            {"id": "4", "title": "d", "state": "Resolved"},
+            {"id": "5", "title": "e", "state": "Closed"},
+        ],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert sorted(seen_ids) == ["4", "5"]
+
+
+def test_collect_calls_the_evidence_reader_with_no_ids_when_nothing_could_owe_it():
+    from board_state import collect
+
+    seen_ids = ["sentinel"]
+
+    def read_evidence(ids):
+        seen_ids.clear()
+        seen_ids.extend(ids)
+        return {}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [{"id": "1", "title": "a", "state": "Active"}],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert seen_ids == []
 
 
 # --- the derived status on the ticket document ---
