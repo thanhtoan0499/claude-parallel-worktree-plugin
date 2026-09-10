@@ -25,7 +25,8 @@ def _unfixable(reason="đã merged"):
 def test_eligible_state_syncs_picks_up_a_fixable_new_pr_drift():
     docs = {"8471": _doc(state="New", drift=_fixable())}
     plans = eligible_state_syncs(docs)
-    assert plans == [{"id": "8471", "from_state": "New", "to_state": "Active", "reason": "PR #726 đang chờ review"}]
+    assert plans == [{"id": "8471", "from_state": "New", "to_state": "Active",
+                      "reason": "PR #726 đang chờ review", "assign_to": None}]
 
 
 def test_eligible_state_syncs_skips_a_ticket_with_no_drift():
@@ -77,7 +78,7 @@ def test_sync_tickets_dry_run_writes_nothing_and_says_what_it_would_do(capsys):
     results = sync_tickets(docs, org="https://dev.azure.com/x", dry_run=True, run=lambda *a, **k: calls.append(a))
 
     assert calls == [], "dry-run must never shell out"
-    assert results == [{"id": "8471", "from_state": "New", "to_state": "Active",
+    assert results == [{"id": "8471", "from_state": "New", "to_state": "Active", "assign_to": None,
                          "reason": "PR #726 đang chờ review", "applied": False, "error": None}]
     out = capsys.readouterr().out
     assert "8471" in out and "New" in out and "Active" in out and "PR #726 đang chờ review" in out
@@ -127,3 +128,78 @@ def test_a_failed_az_call_does_not_abort_the_remaining_tickets():
     by_id = {r["id"]: r for r in results}
     assert by_id["1"]["applied"] is False and "connection reset" in by_id["1"]["error"]
     assert by_id["2"]["applied"] is True and by_id["2"]["error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Rule D's hand-off: a merged Bug moves AND changes hands. A state written without the
+# assignee leaves the ticket in a queue with nobody's name on it, which is the failure the
+# rule exists to prevent.
+# ---------------------------------------------------------------------------
+
+
+def test_a_qc_handoff_carries_the_assignee_through_to_the_plan():
+    from ado_state_sync import eligible_state_syncs
+
+    plans = eligible_state_syncs({
+        "8309": {"state": "Active", "handed_off": False, "state_drift": {
+            "proposed_state": "Ready for QC verify on Stag", "reason": "PR #719 đã merged",
+            "assign_to": "QC", "fixable": True}},
+    })
+    assert len(plans) == 1
+    assert plans[0]["assign_to"] == "QC"
+
+
+def test_a_plan_without_a_hand_off_names_nobody_rather_than_defaulting_to_someone():
+    from ado_state_sync import eligible_state_syncs
+
+    plans = eligible_state_syncs({
+        "8382": {"state": "New", "handed_off": False, "state_drift": {
+            "proposed_state": "Active", "reason": "PR #733 đang chờ review", "fixable": True}},
+    })
+    assert plans[0]["assign_to"] is None
+
+
+def test_the_qc_role_resolves_to_a_real_person_before_it_reaches_az():
+    """A role name is what the rule can know; an ADO identity is what the write needs. The
+    mapping lives in one place so a QC handover does not mean editing the rule."""
+    from ado_state_sync import ROLE_IDENTITY, sync_tickets
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "{}"
+        return R()
+
+    sync_tickets({
+        "8309": {"state": "Active", "handed_off": False, "state_drift": {
+            "proposed_state": "Ready for QC verify on Stag", "reason": "đã merged",
+            "assign_to": "QC", "fixable": True}},
+    }, "https://dev.azure.com/agentiqai", dry_run=False, run=fake_run)
+
+    assert len(calls) == 1, "the state and the assignee must land in one update, not two"
+    assert "--assigned-to" in calls[0]
+    assert calls[0][calls[0].index("--assigned-to") + 1] == ROLE_IDENTITY["QC"]
+
+
+def test_a_state_only_plan_never_passes_an_empty_assignee_to_az():
+    """`--assigned-to ''` clears the field in ADO — a silent unassignment on every sync."""
+    from ado_state_sync import sync_tickets
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        class R:
+            returncode = 0
+            stdout = "{}"
+        return R()
+
+    sync_tickets({
+        "8382": {"state": "New", "handed_off": False, "state_drift": {
+            "proposed_state": "Active", "reason": "chờ review", "fixable": True}},
+    }, "https://dev.azure.com/agentiqai", dry_run=False, run=fake_run)
+
+    assert "--assigned-to" not in calls[0]

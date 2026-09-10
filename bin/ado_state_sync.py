@@ -27,6 +27,13 @@ DEFAULT_SNAPSHOT_PATH = os.path.expanduser("~/.config/board-mirror/last-writes.j
 # refuse these even if ticket_state_drift() is ever wrong.
 _NEVER_WRITE_STATES = frozenset({"Closed", "Removed"})
 
+# A drift rule can know a ROLE ("this belongs to QC now"); only this file knows which person
+# holds that role today. Keeping the two apart means a QC handover is one line here, not an edit
+# to the rule — and the rule stays testable without an ADO identity in it.
+ROLE_IDENTITY = {
+    "QC": "minh.nguyen.2@nois.vn",
+}
+
 
 def snapshot_path() -> str:
     """Same override run-board-mirror.sh honours, so a test run never touches the real snapshot."""
@@ -68,12 +75,17 @@ def eligible_state_syncs(tickets: dict[str, dict]) -> list[dict]:
             "from_state": doc.get("state") or "",
             "to_state": to_state,
             "reason": drift.get("reason") or "",
+            # None, never "": `az ... --assigned-to ""` clears the field, so a state-only plan
+            # that passed an empty string through would silently unassign the ticket.
+            "assign_to": drift.get("assign_to") or None,
         })
     return sorted(plans, key=lambda p: p["id"])
 
 
 def _log(plan: dict, *, dry_run: bool, error: str | None) -> None:
-    head = f"ado_state_sync: AB#{plan['id']} {plan['from_state']} -> {plan['to_state']} ({plan['reason']})"
+    hand = f" -> {plan['assign_to']}" if plan.get("assign_to") else ""
+    head = (f"ado_state_sync: AB#{plan['id']} {plan['from_state']} -> {plan['to_state']}"
+            f"{hand} ({plan['reason']})")
     if error:
         print(f"{head} — FAILED: {error}")
     elif dry_run:
@@ -92,11 +104,14 @@ def sync_tickets(tickets: dict[str, dict], org: str, dry_run: bool = True, run=s
             results.append({**plan, "applied": False, "error": None})
             continue
         try:
-            run(
-                ["az", "boards", "work-item", "update", "--org", org,
-                 "--id", plan["id"], "--state", plan["to_state"]],
-                check=True, capture_output=True, text=True,
-            )
+            cmd = ["az", "boards", "work-item", "update", "--org", org,
+                   "--id", plan["id"], "--state", plan["to_state"]]
+            # One update, not two: a state write that lands while the assignee write fails would
+            # leave the ticket in a queue with nobody's name on it — exactly the gap Rule D closes.
+            identity = ROLE_IDENTITY.get(plan.get("assign_to") or "")
+            if identity:
+                cmd += ["--assigned-to", identity]
+            run(cmd, check=True, capture_output=True, text=True)
         except Exception as exc:
             _log(plan, dry_run=False, error=str(exc))
             results.append({**plan, "applied": False, "error": str(exc)})

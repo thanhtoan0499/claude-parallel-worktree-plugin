@@ -885,6 +885,12 @@ ALLOWED_TICKET_STATES = {
 # open PR someone is reviewing, merging, or watching fail CI.
 _PR_PROVES_STARTED = frozenset({"waiting_review", "waiting_merge", "checks_failing"})
 
+# Where a merged Bug goes, and who owns it there. Merged is not verified — but "who verifies"
+# was never an open question, so the hand-off is written and the verification itself stays human.
+# A Task has no such word (its type table has no QC state), so a merged Task still proposes
+# nothing: closing one is a judgement call, and this file never writes Closed.
+_QC_VERIFY_STATE = "Ready for QC verify on Stag"
+
 _PR_DRIFT_PHRASE = {
     "waiting_review": "đang chờ review",
     "waiting_merge": "đã sẵn sàng merge",
@@ -921,7 +927,25 @@ def ticket_state_drift(state, work_item_type, derived_status, has_block_reason=N
         proposed = "Active" if "Resolved" not in allowed else "Resolved"
         return {"proposed_state": proposed, "reason": _PR_DRIFT_PHRASE[derived_status], "fixable": True}
 
+    # Active asserts a person is touching this right now. A PR sitting in a review queue is the
+    # opposite of that, and the difference is the whole reason a reader scans the column: a row
+    # that says Active hides an ask, a row that names the ask surfaces it. Bug keeps its more
+    # precise word (Resolved = dev done, awaiting verification); Task, which has no such word,
+    # says what it is actually waiting for.
+    if state == "Active" and derived_status == "waiting_review":
+        if "Resolved" in allowed:
+            return {"proposed_state": "Resolved", "reason": _PR_DRIFT_PHRASE[derived_status],
+                    "fixable": True}
+        return {"proposed_state": "Blocked", "reason": "chờ approve PR", "fixable": True}
+
     if derived_status == "merged_not_closed":
+        # Already in the QC queue: the hand-off happened, and re-proposing it every pump cycle
+        # would train the reader to ignore the column.
+        if state == _QC_VERIFY_STATE:
+            return None
+        if _QC_VERIFY_STATE in allowed:
+            return {"proposed_state": _QC_VERIFY_STATE, "reason": "đã merged", "assign_to": "QC",
+                    "fixable": True}
         return {"proposed_state": None, "reason": "đã merged", "fixable": False}
 
     if state == "Blocked" and has_block_reason is False:

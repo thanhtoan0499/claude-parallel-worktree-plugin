@@ -4290,3 +4290,67 @@ def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():
     assert '"Đang làm gì"' not in body.group(0), "the 'Đang làm gì' column survived the merge"
     assert '"Tóm tắt"' in body.group(0), "no 'Tóm tắt' column replaced them"
     assert '"Loại"' not in body.group(0), "the 'Loại' column is still there"
+
+
+# ---------------------------------------------------------------------------
+# Rule D + E, both the CTO's own words on 2026-09-10:
+#   "Nếu là bug vd như 8309 thì sau khi merged status sang Ready for QC verify on Stag
+#    thì phải assignee cho QC là minh nguyen thanh"
+#   "mấy cái PR đang open mà chờ review thì ticket blocking là chờ approve PR kiểu v
+#    thì tôi mới biết chứ"
+# ---------------------------------------------------------------------------
+
+
+def test_a_merged_bug_is_handed_to_qc_rather_than_left_for_someone_to_notice():
+    """Merged is not verified — but who verifies it is not an open question, so the hand-off is
+    the write and the verification stays the human's."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Bug", "merged_not_closed")
+    assert drift["proposed_state"] == "Ready for QC verify on Stag"
+    assert drift["assign_to"] == "QC"
+    assert drift["fixable"] is True
+
+
+def test_a_merged_task_still_proposes_nothing_because_closing_one_is_a_human_call():
+    """Task has no QC-verify state to move to, and Closed is never written from here."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "merged_not_closed")
+    assert drift["proposed_state"] is None
+    assert drift["fixable"] is False
+
+
+def test_an_active_task_whose_pr_is_waiting_on_review_says_so_instead_of_claiming_work():
+    """Active asserts someone is touching it now. Nobody is — the PR is sitting in a queue, and
+    that is the one fact the reader wants off the row without opening anything."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "waiting_review")
+    assert drift["proposed_state"] == "Blocked"
+    assert drift["reason"] == "chờ approve PR"
+    assert drift["fixable"] is True
+
+
+def test_an_active_bug_waiting_on_review_goes_to_resolved_not_blocked():
+    """Bug HAS a word for dev-done-awaiting-verification. Using Blocked there would throw away
+    the more precise state the type already offers."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Bug", "waiting_review")
+    assert drift["proposed_state"] == "Resolved"
+    assert drift["fixable"] is True
+
+
+def test_a_bug_already_resolved_while_its_pr_waits_is_not_drift():
+    """Resolved + open PR is the correct pair — reporting it would train the reader to ignore
+    the column."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Resolved", "Bug", "waiting_review") is None
+
+
+def test_a_bug_already_in_the_qc_queue_is_not_re_proposed_on_every_pump_cycle():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Ready for QC verify on Stag", "Bug", "merged_not_closed") is None
