@@ -71,6 +71,66 @@ def test_session_docs_mark_an_unregistered_task_as_not_managed():
     assert doc["managed"] is False
 
 
+# ---------------------------------------------------------------------------
+# Rule C — a live session whose name is not in the registry, while a registry entry differing
+# only by a trailing suffix exists. Real evidence: worktrees provisioned as t8309-confirm-tool /
+# t8325-e2e, sessions dispatched as t8309d / t8325b — the board went quiet with no error anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_mis_dispatched_session_names_both_names():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8309d", registry)
+
+    assert drift is not None
+    assert drift["proposed_state"] is None, "never auto-patch the registry — a wrong guess is worse than an empty card"
+    assert drift["fixable"] is False
+    assert "t8309d" in drift["reason"] and "t8309-confirm-tool" in drift["reason"]
+    assert drift["registry_name"] == "t8309-confirm-tool"
+
+
+def test_todays_real_case_the_second_mis_dispatched_session_too():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8325b", registry)
+
+    assert drift is not None and drift["registry_name"] == "t8325-e2e"
+
+
+def test_a_registered_session_is_never_drift():
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("t8309-confirm-tool", {"t8309-confirm-tool": {}}) is None
+
+
+def test_a_genuinely_ad_hoc_session_with_nothing_resembling_it_stays_silent():
+    """An ad-hoc terminal session with no registry entry and nothing similar is normal — flagging
+    it would be indistinguishable from Rule C nagging every spike and smoke test."""
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("someones-quick-spike", {"t8309-confirm-tool": {}}) is None
+
+
+def test_registry_drift_is_distinct_from_managed_false_on_its_own():
+    """Keep strictly distinct from `managed: false` — an unregistered session with nothing
+    resembling it must not carry state_drift even though it is unmanaged."""
+    doc = session_docs([{"name": "someones-quick-spike", "sessionId": "s1", "state": "idle"}],
+                       {"t8309-confirm-tool": {}})["someones-quick-spike"]
+    assert doc["managed"] is False
+    assert doc["state_drift"] is None
+
+
+def test_session_docs_publish_the_registry_drift_for_a_mis_dispatched_session():
+    doc = session_docs([{"name": "t8309d", "sessionId": "s1", "state": "running"}],
+                       {"t8309-confirm-tool": {}})["t8309d"]
+    assert doc["managed"] is False
+    assert doc["state_drift"]["registry_name"] == "t8309-confirm-tool"
+    assert doc["state_drift"]["fixable"] is False
+
+
 def test_session_docs_read_state_from_either_field_name():
     """`claude agents --json` has used both `state` and `status`; the dashboard already reads
     whichever is present and this must not disagree with it."""
@@ -3461,6 +3521,211 @@ def test_board_state_and_board_html_agree_on_which_ticket_states_mean_done():
     assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(TICKET_DONE_STATES)
 
 
+# ---------------------------------------------------------------------------
+# state_drift — the board saying `state` and `derived_status` cannot both be true. Real evidence,
+# 2026-09-09: ticket 8471 published `state: New`, `derived_status: waiting_review`, an OPEN PR
+# with green checks. A ticket nobody has started cannot have that PR.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_8471_a_new_task_with_a_pr_waiting_review_proposes_active():
+    """The exact record that prompted this file. A Task has no Resolved state, so the only
+    honest correction is Active."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_review")
+    assert drift is not None
+    assert drift["proposed_state"] == "Active"
+    assert drift["fixable"] is True
+
+
+def test_todays_real_case_5061_a_resolved_bug_is_not_drift():
+    """A false alarm here would be worse than the bug this file exists to catch — 5061 is already
+    correct today."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Resolved", "Bug", "waiting_review") is None
+
+
+def test_a_bug_proposes_resolved_not_active_because_a_bug_has_a_resolved_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Bug", "waiting_merge")
+    assert drift["proposed_state"] == "Resolved"
+
+
+def test_checks_failing_is_also_proof_a_pr_exists():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "checks_failing")
+    assert drift is not None and drift["proposed_state"] == "Active"
+
+
+def test_new_with_no_pr_backed_derived_status_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Task", "unclaimed") is None
+    assert ticket_state_drift("New", "Task", None) is None
+
+
+def test_merged_not_closed_is_reported_but_proposes_nothing():
+    """Merged is not verified — a human has to confirm it, not this file."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "merged_not_closed")
+    assert drift is not None
+    assert drift["proposed_state"] is None
+    assert drift["fixable"] is False
+
+
+def test_unclaimed_while_active_is_not_drift():
+    """Pinned: a person may be working outside this system entirely. Flagging this would nag at
+    honest work."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Active", "Task", "unclaimed") is None
+
+
+def test_a_task_never_proposes_resolved_task_has_no_such_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_merge")
+    assert drift["proposed_state"] == "Active"
+
+
+def test_unknown_state_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Frobnicated", "Task", "waiting_review") is None
+
+
+def test_unknown_work_item_type_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Epic", "waiting_review") is None
+
+
+def test_state_drift_is_published_beside_state_and_derived_status_never_instead_of_them():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8471", "title": "x", "state": "New", "type": "Task"}],
+        {"8471": _pr(number=726, state="OPEN", review="REVIEW_REQUIRED", checks="passing")},
+    )
+    doc = docs["8471"]
+    assert doc["state"] == "New"
+    assert doc["derived_status"] == "waiting_review"
+    assert doc["state_drift"]["proposed_state"] == "Active"
+    assert doc["state_drift"]["fixable"] is True
+    assert "726" in doc["state_drift"]["reason"] and "New" not in doc["state_drift"]["reason"]
+
+
+def test_state_drift_is_null_when_state_and_derived_status_agree():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "5061", "title": "x", "state": "Resolved", "type": "Bug"}],
+        {"5061": _pr(review="REVIEW_REQUIRED", checks="passing")},
+    )
+    assert docs["5061"]["state_drift"] is None
+
+
+# ---------------------------------------------------------------------------
+# Rule B — a Blocked ticket must say who is blocking and on what. The ledger is the only
+# writable place (ADO tags: `TF401289: The current user does not have permissions to create
+# tags`), so the convention is a non-cancelled assignment naming the ticket whose note carries
+# `CHẶN BỞI:`. Folded into the same state_drift concept: same shape, proposes nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_blocked_ticket_with_no_ledger_note_is_drift():
+    """Three tickets sat Blocked today with the reason recorded nowhere machine-readable — the
+    board was asserting a block it could not explain."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=False)
+    assert drift is not None
+    assert drift["proposed_state"] is None, "the fix is a human writing the reason, not a state moving"
+    assert drift["fixable"] is False
+
+
+def test_a_blocked_ticket_with_a_ledger_note_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=True) is None
+
+
+def test_blocked_reason_check_is_skipped_when_not_computed():
+    """`has_block_reason=None` means "not checked" — the caller has no ledger data at all — and
+    must never be treated as a positive finding of absence. Callers who never pass it (every
+    pre-existing one) must see the exact same behaviour as before this rule existed."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed") is None
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=None) is None
+
+
+def test_blocked_reason_rule_applies_to_bugs_too():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Bug", "unclaimed", has_block_reason=False)
+    assert drift is not None and drift["fixable"] is False
+
+
+def test_blocked_reason_refs_collects_tickets_a_live_assignment_explains():
+    from board_state import _blocked_reason_refs, assignment_docs
+
+    docs = assignment_docs(
+        [
+            {"id": "a1", "ts": 1.0, "ado_refs": ["100"], "status": "blocked", "note": "CHẶN BỞI: CTO — chờ duyệt scope"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["200"], "status": "blocked", "note": "đang chờ, chưa rõ vì sao"},
+            {"id": "a3", "ts": 1.0, "ado_refs": ["300"], "status": "cancelled", "note": "CHẶN BỞI: CTO"},
+        ],
+        now=2.0,
+    )
+
+    assert _blocked_reason_refs(docs) == {"100"}
+
+
+def test_ticket_docs_flags_a_blocked_ticket_the_ledger_never_explains():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs=set(),
+    )
+    assert docs["1"]["state_drift"]["fixable"] is False
+    assert docs["1"]["state_drift"]["proposed_state"] is None
+
+
+def test_ticket_docs_leaves_a_blocked_ticket_alone_once_the_ledger_explains_it():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs={"1"},
+    )
+    assert docs["1"]["state_drift"] is None
+
+
+def test_build_writes_wires_the_ledger_note_check_onto_blocked_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "explained", "state": "Blocked", "type": "Task"},
+                 {"id": "2", "title": "unexplained", "state": "Blocked", "type": "Task"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[
+            {"id": "a1", "ts": 1.0, "ado_refs": ["1"], "status": "blocked", "note": "CHẶN BỞI: CTO"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["2"], "status": "blocked", "note": ""},
+        ],
+    )
+    by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
+    assert by_id["1"]["state_drift"] is None
+    assert by_id["2"]["state_drift"]["fixable"] is False
+
+
 # --- the derived status on the ticket document ---
 
 
@@ -3572,6 +3837,50 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     summary = re.search(r"function ticketSummary\((.*?)\n\}\n", script, re.S)
     assert summary, "ticketSummary() not found"
     assert "t.derived_status" in summary.group(1), "the summary no longer reads the derived status"
+
+
+# ---------------------------------------------------------------------------
+# state_drift on the board (Part 2) — a reader must see it where they already look, in the same
+# warning-icon-plus-tooltip idiom escalationCard() already uses for kind_raw drift.
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_drift_title_names_both_sides():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(
+        prelude
+        + """
+        console.log(ticketDriftTitle({
+          state: "New",
+          state_drift: { proposed_state: "Active", reason: "PR #726 đang chờ review", fixable: true },
+        }));
+        """
+    )
+    assert out == "ADO ghi New nhưng PR #726 đang chờ review", out
+
+
+def test_ticket_drift_title_is_null_with_no_drift():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(prelude + '\nconsole.log(ticketDriftTitle({ state: "Active", state_drift: null }));')
+    assert out == "null", out
+
+
+def test_ticket_row_reuses_the_drift_css_class_for_state_drift():
+    """The same look escalationCard() already uses for kind_raw drift — not a second one invented
+    for this."""
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    assert 'class: "drift"' in body.group(1), "ticketRow() does not reuse the .drift idiom"
+    assert "ticketDriftTitle(" in body.group(1), "ticketRow() never calls ticketDriftTitle()"
+    assert "state_drift" in body.group(1)
+
+
+def test_session_tile_reuses_the_drift_css_class_for_a_mis_dispatched_session():
+    """Rule C, same look as Rule A/B on the ticket row — one wording style across the board."""
+    body = re.search(r"function sessionTile\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "sessionTile() not found"
+    assert 'class: "drift"' in body.group(1), "sessionTile() does not reuse the .drift idiom"
+    assert "s.state_drift" in body.group(1)
 
 
 # ---------------------------------------------------------------------------

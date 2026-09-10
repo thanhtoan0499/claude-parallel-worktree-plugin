@@ -298,7 +298,10 @@ def get_github_prs(repo_root: str) -> list[dict]:
         # Two calls CAN disagree about which PRs exist, which is why the second is joined onto
         # the first by number rather than replacing it: a PR that closed between the two simply
         # gets no rollup, and one that opened is absent from the wide sweep either way.
-        prs = gh_pr_list("all", "number,title,url,state,isDraft,reviewDecision")
+        # mergedAt rides along free on this same wide sweep — board_state.evidence_drift() needs
+        # it to tell "evidence taken before the fix" apart from "evidence proves this fix", and a
+        # ticket's linked commit date is not reachable at this cost (see get_ado_attachments()).
+        prs = gh_pr_list("all", "number,title,url,state,isDraft,reviewDecision,mergedAt")
         rollups = {
             pr.get("number"): pr.get("statusCheckRollup")
             for pr in gh_pr_list("open", "number,statusCheckRollup")
@@ -451,6 +454,55 @@ def get_ado_backlog() -> list[dict]:
         return tickets
 
     return _cached("ado_backlog", run, ttl=60.0)
+
+
+def get_ado_attachments(ids: list[str]) -> dict[str, list[dict]]:
+    """Evidence — ADO `AttachedFile` relations — for a SMALL set of tickets, in one batch REST
+    call rather than one `az` invocation per ticket.
+
+    `az boards query` (get_ado_backlog's own WIQL) never returns relations at all, and `az boards
+    work-item show --expand relations` is a per-id call — so the only way to keep this cheap
+    regardless of ticket count is `_apis/wit/workitemsbatch`, called through `az rest` (same `az`
+    session/auth get_ado_backlog already uses, no separate credential). Callers are expected to
+    have already filtered `ids` down to tickets that could actually owe evidence
+    (board_state.EVIDENCE_OWED_STATES) — this function only fetches, it does not filter by state.
+
+    Raises rather than degrading to `{}` on failure, deliberately matching get_ado_backlog's own
+    contract and for the identical reason: a caller that treats a failed read as "checked, found
+    nothing" would flag every evidence-owing ticket as OWING on every `az` hiccup. `{}` for an
+    empty `ids` is the one legitimate empty case — nothing to check costs nothing, not even a
+    subprocess call.
+    """
+    ids = [str(i) for i in ids if i]
+    if not ids:
+        return {}
+
+    result = subprocess.run(
+        [
+            "az", "rest", "--method", "post",
+            "--url", f"{_ADO_ORG}/{_ADO_PROJECT}/_apis/wit/workitemsbatch?api-version=7.1",
+            "--headers", "Content-Type=application/json",
+            "--body", json.dumps({"ids": [int(i) for i in ids], "$expand": "relations"}),
+        ],
+        capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"az rest workitemsbatch exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+        )
+    attachments: dict[str, list[dict]] = {i: [] for i in ids}
+    for item in json.loads(result.stdout).get("value") or []:
+        wid = str(item.get("id"))
+        for rel in item.get("relations") or []:
+            if rel.get("rel") != "AttachedFile":
+                continue
+            attrs = rel.get("attributes") or {}
+            attachments.setdefault(wid, []).append({
+                "name": attrs.get("name") or "",
+                "url": rel.get("url") or "",
+                "created": attrs.get("resourceCreatedDate"),
+            })
+    return attachments
 
 
 def _iteration_leaves(node: dict) -> list[dict]:

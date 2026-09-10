@@ -185,6 +185,45 @@ def _contradiction(claim, state: str) -> dict | None:
     return {"claim_phase": claim["phase"], "session_state": state}
 
 
+# The leading "root" of a worktree task name — parallel-task.sh names tend to start with a
+# ticket-ish token (`t8309`) and then a free-text slug. Two names sharing this root but not
+# otherwise equal is the "differs only by a trailing suffix" shape a mis-dispatch takes: the
+# session and the registry entry both extended from the same starting point, by different text.
+_TASK_ROOT = re.compile(r"^[a-z]*\d+")
+
+
+def session_registry_drift(name: str, registry: dict) -> dict | None:
+    """A probable mis-dispatch — `name` matches no registry entry, but some entry shares its
+    leading root and only the trailing suffix differs (`t8309d` vs `t8309-confirm-tool`) — or
+    None.
+
+    None also covers the ordinary case: an ad-hoc session (a spike, a smoke test, someone's own
+    terminal) with no registry entry and nothing resembling it. That is normal and must stay
+    silent — this is deliberately narrower than `managed: false` on its own, which needsAttention()
+    already reads as its own, different signal.
+
+    Never proposes anything (`proposed_state` is always None) — a wrong guess would attach a
+    session to the wrong ticket, worse than an empty card. `registry_name` names the candidate
+    explicitly so a human does not have to go looking for it.
+    """
+    if not isinstance(registry, dict) or name in registry:
+        return None
+    root = _TASK_ROOT.match(name or "")
+    if not root:
+        return None
+    root = root.group(0)
+    for candidate in registry:
+        candidate_root = _TASK_ROOT.match(candidate or "")
+        if candidate != name and candidate_root and candidate_root.group(0) == root:
+            return {
+                "proposed_state": None,
+                "fixable": False,
+                "reason": f'phiên "{name}" không khớp registry — có thể gõ nhầm tên khi giao việc, đúng ra là "{candidate}"',
+                "registry_name": candidate,
+            }
+    return None
+
+
 def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
                  now: float = 0.0, stale_after: float | None = None) -> dict[str, dict]:
     """One document per live task, keyed by task name.
@@ -222,6 +261,9 @@ def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
             "claim": claim,
             "claim_ignored": ignored,
             "contradiction": _contradiction(claim, state),
+            # Rule C: a probable mis-dispatch, never a plain unmanaged session — see
+            # session_registry_drift()'s docstring for why the two must stay distinct.
+            "state_drift": session_registry_drift(name, registry),
             # True iff parallel-task.sh actually dispatched this task — an entry EXISTS in the
             # registry, not "branch happens to be truthy". A registry row with a blank branch
             # field is still work the manager provisioned; `bool(reg)` or `bool(branch)` would
@@ -827,8 +869,90 @@ def ticket_status(ticket_state, pr: dict | None, claimed: bool, escalated: bool)
     return "waiting_push" if claimed else "unclaimed"
 
 
+# Allowed states by work item type — never assumed to match. A Bug can be Resolved; a Task
+# cannot, and proposing it would be exactly the kind of confidently wrong answer this file exists
+# to stop.
+ALLOWED_TICKET_STATES = {
+    "Task": frozenset({"New", "Active", "Blocked", "Closed", "Removed"}),
+    "Bug": frozenset({
+        "New", "Active", "Blocked", "Resolved",
+        "Ready for QC verify on Stag", "QC Testing on Stag", "Closed",
+    }),
+}
+
+# Any of these three is proof an OPEN PR exists. A ticket sitting at `New` while one of them is
+# true is the provable contradiction: "nobody has started" cannot be true of a ticket with an
+# open PR someone is reviewing, merging, or watching fail CI.
+_PR_PROVES_STARTED = frozenset({"waiting_review", "waiting_merge", "checks_failing"})
+
+_PR_DRIFT_PHRASE = {
+    "waiting_review": "đang chờ review",
+    "waiting_merge": "đã sẵn sàng merge",
+    "checks_failing": "đang fail checks",
+}
+
+
+def ticket_state_drift(state, work_item_type, derived_status, has_block_reason=None) -> dict | None:
+    """The state ADO should hold when it disagrees with the evidence, or None when they agree.
+
+    `None` also covers a state or work-item-type this file does not recognise — the same
+    fail-toward-silence rule the rest of this file uses for vocabulary it cannot place: guessing a
+    correction for a state nobody named to this function is worse than saying nothing.
+
+    Three contradictions, one shape (`proposed_state` / `reason` / `fixable`):
+      - `New` while the PR proves work has started: the only one with a proposed fix, because it
+        is the only one certain enough to write back — see Part 3's hard limits. Never proposes a
+        state the type does not allow (Bug -> Resolved, Task -> Active; Task has no Resolved).
+      - `merged_not_closed`: worth reporting, proposes nothing — merged is not verified, and that
+        call is a human's.
+      - `Blocked` with no assignment-ledger note explaining it (`has_block_reason=False`; `None`
+        means "not checked" and is silently skipped, never treated as a positive finding of
+        absence): the board is asserting a block it cannot explain. Proposes nothing — the fix is
+        a person writing the reason, not a state moving.
+
+    `reason` is deliberately generic (no ticket-specific PR number) — ticket_docs() is the one
+    with the actual `pr` dict, and folds the number in before publishing.
+    """
+    allowed = ALLOWED_TICKET_STATES.get(work_item_type)
+    if allowed is None or state not in allowed:
+        return None
+
+    if state == "New" and derived_status in _PR_PROVES_STARTED:
+        proposed = "Active" if "Resolved" not in allowed else "Resolved"
+        return {"proposed_state": proposed, "reason": _PR_DRIFT_PHRASE[derived_status], "fixable": True}
+
+    if derived_status == "merged_not_closed":
+        return {"proposed_state": None, "reason": "đã merged", "fixable": False}
+
+    if state == "Blocked" and has_block_reason is False:
+        return {
+            "proposed_state": None,
+            "reason": "không có ghi chú CHẶN BỞI: trong sổ giao việc",
+            "fixable": False,
+        }
+
+    return None
+
+
+def _state_drift_doc(state, work_item_type, derived_status, has_block_reason, pr: dict | None) -> dict | None:
+    """`ticket_state_drift()`'s result, enriched with the one thing it cannot know: this
+    ticket's actual PR number — so the published reason names both sides, e.g. "PR #726 đang chờ
+    review", without ticket_state_drift() taking a whole `pr` dict just to read one field.
+    """
+    drift = ticket_state_drift(state, work_item_type, derived_status, has_block_reason)
+    if drift is None:
+        return None
+    reason = drift["reason"]
+    number = (pr or {}).get("number")
+    # Only the two PR-shaped reasons ever mention a PR — a Blocked-with-no-note reason has
+    # nothing to do with any PR that ticket happens to also carry.
+    if number is not None and reason in (*_PR_DRIFT_PHRASE.values(), "đã merged"):
+        reason = f"PR #{number} {reason}"
+    return {"proposed_state": drift["proposed_state"], "reason": reason, "fixable": drift["fixable"]}
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
-                assignment_refs=None, escalated_refs=None) -> dict[str, dict]:
+                assignment_refs=None, escalated_refs=None, blocked_reason_refs=None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
@@ -852,17 +976,21 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | Non
         ownership = _ticket_ownership(ticket, owners or [])
         key = str(ticket_id)
         pr = (pr_by_ticket or {}).get(key)
+        state = ticket.get("state") or ""
+        derived_status = ticket_status(state, pr, key in assignment_refs, key in escalated_refs)
+        has_block_reason = None if blocked_reason_refs is None else key in blocked_reason_refs
         docs[key] = {
             "id": key,
             "title": ticket.get("title") or "",
-            "state": ticket.get("state") or "",
+            "state": state,
             "sprint": ticket.get("sprint") or "",
             "type": ticket.get("type") or "",
             "url": ticket.get("url") or "",
             "pr": pr,
-            "derived_status": ticket_status(
-                ticket.get("state") or "", pr, key in assignment_refs, key in escalated_refs
-            ),
+            "derived_status": derived_status,
+            # Published BESIDE state and derived_status, never instead of either — see
+            # ticket_state_drift()'s docstring for the three contradictions this can name.
+            "state_drift": _state_drift_doc(state, ticket.get("type") or "", derived_status, has_block_reason, pr),
             "handed_off": ownership["handed_off"],
             "handed_off_to": ownership["handed_off_to"],
         }
@@ -1007,6 +1135,22 @@ def _assignment_refs(assignments_docs: dict) -> set[str]:
     }
 
 
+def _blocked_reason_refs(assignments_docs: dict) -> set[str]:
+    """Every ticket a live assignment has already explained being Blocked on.
+
+    `CHẶN BỞI:` in the note is the only machine-readable record of why a ticket is blocked — ADO
+    tags are unwritable for this account (`TF401289: The current user does not have permissions
+    to create tags`). Cancelled is excluded for the same reason _assignment_refs() excludes it: an
+    abandoned assignment's old note explains nothing about why the ticket is blocked today.
+    """
+    return {
+        ref
+        for doc in assignments_docs.values()
+        if doc.get("status") != "cancelled" and "CHẶN BỞI:" in str(doc.get("note") or "")
+        for ref in doc.get("ado_refs") or []
+    }
+
+
 def _escalated_refs(escalations_docs: dict, registry: dict) -> set[str]:
     """Every ticket sitting behind an escalation nobody has answered yet.
 
@@ -1068,6 +1212,7 @@ def build_writes(
         tickets, pr_by_ticket, owners,
         assignment_refs=_assignment_refs(assignments_docs),
         escalated_refs=_escalated_refs(escalations_docs, registry),
+        blocked_reason_refs=_blocked_reason_refs(assignments_docs),
     )
     for collection, docs in (
         # The claim window is sized off the very cadence stamped onto meta/status below, so the

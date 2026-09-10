@@ -169,6 +169,115 @@ def test_get_ado_backlog_treats_a_null_result_as_a_successful_empty_sweep():
     assert _backlog_with(lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "null", "")) == []
 
 
+# ---------------------------------------------------------------------------
+# get_ado_attachments — evidence relations, in one batch call rather than one `az` invocation
+# per ticket. `az boards query` never returns relations at all (verified against get_ado_backlog
+# above), so this is the only way to see them.
+# ---------------------------------------------------------------------------
+
+
+def _attachments_with(mock_run, ids):
+    from dashboard import get_ado_attachments
+
+    original_run = subprocess.run
+    subprocess.run = mock_run
+    try:
+        return get_ado_attachments(ids)
+    finally:
+        subprocess.run = original_run
+
+
+def test_get_ado_attachments_makes_no_call_at_all_for_an_empty_id_list():
+    """Nothing to check costs nothing — a pump cycle with no evidence-owing tickets must not
+    spend a single subprocess call here."""
+
+    def mock_run(*args, **kwargs):
+        raise AssertionError("must not shell out when there is nothing to fetch")
+
+    assert _attachments_with(mock_run, []) == {}
+
+
+def test_get_ado_attachments_is_one_call_for_the_whole_batch():
+    calls = []
+
+    def mock_run(cmd, **kwargs):
+        calls.append(cmd)
+        payload = {"value": [{"id": 8172, "relations": []}, {"id": 8325, "relations": []}]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    _attachments_with(mock_run, ["8172", "8325"])
+    assert len(calls) == 1, "must be exactly one az invocation for the whole batch, not one per ticket"
+    assert "workitemsbatch" in calls[0][calls[0].index("--url") + 1]
+
+
+def test_get_ado_attachments_extracts_name_url_created_date_per_ticket():
+    def mock_run(cmd, **kwargs):
+        payload = {
+            "value": [
+                {
+                    "id": 8172,
+                    "relations": [
+                        {
+                            "rel": "AttachedFile",
+                            "url": "https://dev.azure.com/agentiqai/_apis/wit/attachments/abc",
+                            "attributes": {
+                                "name": "ev-deviation-wording-contrast.png",
+                                "resourceCreatedDate": "2026-08-25T10:00:00Z",
+                            },
+                        },
+                    ],
+                },
+            ]
+        }
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    result = _attachments_with(mock_run, ["8172"])
+    assert result == {
+        "8172": [{
+            "name": "ev-deviation-wording-contrast.png",
+            "url": "https://dev.azure.com/agentiqai/_apis/wit/attachments/abc",
+            "created": "2026-08-25T10:00:00Z",
+        }],
+    }
+
+
+def test_get_ado_attachments_ignores_relations_that_are_not_attached_files():
+    """A work item carries other relation kinds too (parent/child links) — only AttachedFile is
+    evidence."""
+
+    def mock_run(cmd, **kwargs):
+        payload = {"value": [{"id": 1, "relations": [{"rel": "System.LinkTypes.Hierarchy-Forward", "url": "x"}]}]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    assert _attachments_with(mock_run, ["1"]) == {"1": []}
+
+
+def test_get_ado_attachments_reports_zero_files_for_a_requested_ticket_with_none():
+    """8325 and 8471 — real evidence, zero attachments. Every requested id must come back with an
+    explicit empty list, not be silently absent (silence would look identical to "not checked")."""
+
+    def mock_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"value": []}), "")
+
+    assert _attachments_with(mock_run, ["8325", "8471"]) == {"8325": [], "8471": []}
+
+
+def test_get_ado_attachments_raises_rather_than_reporting_a_false_empty_batch():
+    """Same failure mode get_ado_backlog's own docstring warns about: swallowing this into {}
+    would make every evidence-owing ticket in the batch read as "checked, zero" when the truth is
+    "never checked" — a false OWES alarm on the whole batch."""
+
+    def mock_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "ERROR: Please run 'az login'.")
+
+    try:
+        _attachments_with(mock_run, ["1"])
+    except RuntimeError as exc:
+        assert "az login" in str(exc)
+        return
+    raise AssertionError("a failed batch call must not be reported as zero attachments")
+
+
 def test_iteration_leaves_extracts_name_and_date_range():
     tree = {
         "name": "AgentIQ",

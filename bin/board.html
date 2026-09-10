@@ -807,7 +807,11 @@ function sessionTile(s) {
     h("div", { class: "state-badge b-" + state },
       h("span", { class: "state-dot" + (state === "waiting" ? " dot-waiting" : "") }),
       STATE_LABEL[state] || s.state || "?"),
-    h("div", { class: "session-task" }, s.task || s.id),
+    h("div", { class: "session-task" }, s.task || s.id,
+      // Rule C: a probable mis-dispatch — this session's name matches no registry entry, but one
+      // differs only by a trailing suffix. Same .drift idiom as the ticket row (Part 2) — one
+      // wording style, and board_state.py's reason already names both names.
+      s.state_drift ? h("span", { class: "drift", title: s.state_drift.reason }, "⚠") : null),
     h("div", { class: "session-row" }, h("span", { class: "k" }, "nhánh"),
       h("span", { class: "v" }, s.branch || "—")),
     h("div", { class: "session-row" }, h("span", { class: "k" }, "chạy"),
@@ -1164,6 +1168,13 @@ function ticketStateTone(state) {
   if (state === "Resolved") return "pill-good";
   return "pill-neutral";
 }
+// The tooltip for state_drift's warning icon — names both sides the way board_state.py's
+// state_drift.reason was built to be read: "ADO ghi <state> nhưng <reason>". Pure so it is
+// testable outside the page, the same as assignmentForTicket()/ticketCurrentAction() above.
+function ticketDriftTitle(t) {
+  if (!t.state_drift) return null;
+  return "ADO ghi " + (t.state || "—") + " nhưng " + t.state_drift.reason;
+}
 function ticketPrChip(pr) {
   if (!pr) return null;
   const tone = pr.state === "MERGED" ? "pill-good" : pr.state === "OPEN" ? "pill-accent" : "pill-neutral";
@@ -1189,7 +1200,10 @@ function ticketRow(t, opts) {
     // is what the board derived from the evidence — and where the two disagree, that is itself
     // the thing worth seeing. A null derived status means there is genuinely nothing left to
     // chase (a closed ticket whose PR merged), never "unknown".
-    h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
+    h("td", {}, pill(ticketStateTone(t.state), t.state || "—"),
+      t.state_drift
+        ? h("span", { class: "drift", title: ticketDriftTitle(t) }, "⚠")
+        : null),
     // A live claim turns the pill into a jump to that card — a more specific answer to the exact
     // question this column already asks. No claim, no link: a dead href is worse than plain text.
     // A live claim turns the summary into a jump to the card running it — the step-by-step detail

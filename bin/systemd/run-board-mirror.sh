@@ -242,6 +242,23 @@ for ((i = 0; i < ${#BATCHES[@]}; i++)); do
   LAST_OK_LINE="$OK_LINE"
 done
 
+# ado_state_sync.py — AFTER every batch above, never before, so it reads the snapshot this same
+# run just wrote rather than one up to a cadence stale. It only ever acts on state_drift's one
+# `fixable` direction (New + PR-exists) and reads BOARD_MIRROR_SNAPSHOT itself, so pointing it at
+# the same $SNAPSHOT_PATH this run just checkpointed to is enough — no other flag is required.
+#
+# Dry-run unless an operator has explicitly opted in: writing to ADO is the CTO's call, not this
+# script's, so --apply is gated behind BOARD_MIRROR_APPLY_STATE_SYNC=1 rather than ever passed
+# unconditionally. Non-fatal, the same as board_mirror_answers.py above — a state-sync problem
+# must not turn a mirror run that already succeeded into a failed unit.
+SYNC_FLAGS=()
+if [[ "${BOARD_MIRROR_APPLY_STATE_SYNC:-}" == "1" ]]; then
+  SYNC_FLAGS+=(--apply)
+fi
+if ! BOARD_MIRROR_SNAPSHOT="$SNAPSHOT_PATH" python3 "$PLUGIN_BIN_DIR/ado_state_sync.py" "${SYNC_FLAGS[@]}"; then
+  echo "run-board-mirror: ado_state_sync.py reported a failure (non-fatal — see above)" >&2
+fi
+
 REMAINING=$((${#BATCHES[@]} - DONE_BATCHES))
 if ((REMAINING > 0)); then
   # Deliberately exit 0 and deliberately NOT the REFRESH_OK line: real, durable progress was made
