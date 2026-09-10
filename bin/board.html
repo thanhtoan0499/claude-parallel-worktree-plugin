@@ -323,7 +323,12 @@
     display: block;
   }
   .evidence-count { font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
-  .evidence-more { font-size: var(--fs-xs); color: var(--faint); }
+  /* The shared collapse control, sized for a table cell rather than a card. */
+  .evidence-list > details.collapsed-group { width: 100%; margin-top: 0; }
+  .evidence-list > details.collapsed-group > summary {
+    font-size: var(--fs-xs); font-weight: 500; color: var(--faint); padding: 1px 0; gap: 3px;
+  }
+  .evidence-list > details.collapsed-group > .chip { margin-top: 3px; }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1223,6 +1228,19 @@ function ticketDriftTitle(t) {
 // it, so this cell and Part 4's ticketSummary() line can never disagree about the same ticket.
 // A ticket that owes nothing stays quiet ("—"): no green tick, which would be noise on every row
 // that simply isn't done yet.
+// ADO stores an AttachedFile relation's url WITHOUT a filename, and that bare endpoint answers
+// `application/octet-stream` + `content-disposition: attachment` — so every click saves a file
+// instead of showing it. Handing it a fileName whose extension ADO recognises flips the response
+// to the real content type with no disposition header, and the browser renders it in the tab.
+// (Checked against a live attachment on 2026-09-10: bare url and `?download=false` alone both
+// still download; it is the fileName that decides.)
+function evidenceHref(url, name) {
+  const safe = safeHref(url);
+  if (!safe) return null;
+  const sep = safe.includes("?") ? "&" : "?";
+  return safe + sep + "fileName=" + encodeURIComponent(name || "file") + "&download=false";
+}
+
 function evidenceCell(t) {
   const items = Array.isArray(t.evidence) ? t.evidence : [];
   const drift = evidenceDrift(t, items, t.pr);
@@ -1233,21 +1251,26 @@ function evidenceCell(t) {
   // left — the ticket itself is one click away for the rest, and this column's job is to answer
   // "is there proof" at a glance, not to be a file manager.
   const SHOWN = 3;
-  const head = items.slice(0, SHOWN);
-  const rest = items.length - head.length;
+  const chipFor = (e) => {
+    const label = e.name || "(không tên)";
+    // The full name on hover — truncation only works while the whole name stays reachable.
+    const title = e.created ? label + " · " + e.created : label;
+    const href = evidenceHref(e.url, label);
+    return href
+      ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title }, label)
+      : h("span", { class: "chip", title }, label);
+  };
+  const rest = items.slice(SHOWN);
   return h(
     "div", { class: "evidence-list" },
     items.length > 1 ? h("span", { class: "evidence-count" }, items.length + " tệp") : null,
-    head.map((e) => {
-      const href = safeHref(e.url);
-      const label = e.name || "(không tên)";
-      // The full name on hover — truncation only works while the whole name stays reachable.
-      const title = e.created ? label + " · " + e.created : label;
-      return href
-        ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title }, label)
-        : h("span", { class: "chip", title }, label);
-    }),
-    rest > 0 ? h("span", { class: "evidence-more" }, "+" + rest + " tệp nữa") : null,
+    items.slice(0, SHOWN).map(chipFor),
+    // A bare "+4 tệp nữa" says something is hidden and offers no way to reach it, which is worse
+    // than not mentioning it. <details> is the whole control — no state to keep, and it stays
+    // open per row as the board re-renders on the pump's tick.
+    // collapsedGroup() is the page's one collapse mechanism — a second hand-rolled toggle here
+    // would style and behave differently for no gain. It is only sized down for this cell.
+    rest.length ? collapsedGroup("+" + rest.length + " tệp nữa", rest.map(chipFor)) : null,
   );
 }
 function ticketPrChip(pr) {

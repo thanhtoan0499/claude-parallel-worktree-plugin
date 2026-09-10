@@ -4785,3 +4785,74 @@ def test_every_evidence_chip_carries_its_full_name_for_hover():
     assert fn, "evidenceCell() not found"
     assert re.search(r"\btitle\b", fn.group(0)), "no hover title on the evidence chips"
     assert "e.name" in fn.group(0)
+
+
+# ---------------------------------------------------------------------------
+# Previewing evidence, not downloading it. The raw `AttachedFile` relation url ADO stores
+# carries no filename, and that endpoint answers `application/octet-stream` +
+# `content-disposition: attachment` — every click saves a file. Adding a fileName whose
+# extension ADO recognises flips it to `image/png` with no disposition header, so the
+# browser renders it in the tab. Verified against a live attachment on 2026-09-10.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_href_prelude():
+    script = _board_html_script()
+    # evidenceHref() delegates the scheme check to safeHref() — the same guard every other href
+    # sink on this page uses — so the prelude needs both.
+    return _js_function("safeHref", script) + "\n" + _js_function("evidenceHref", script)
+
+
+def test_an_evidence_link_carries_the_filename_that_makes_ado_serve_it_inline():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref(
+          "https://dev.azure.com/o/p/_apis/wit/attachments/abc", "shot.png"));
+        """
+    )
+    assert "fileName=shot.png" in out
+    assert "download=false" in out
+    assert out.startswith("https://dev.azure.com/o/p/_apis/wit/attachments/abc?")
+
+
+def test_an_url_that_already_has_a_query_gets_the_parameters_appended_not_a_second_question_mark():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref("https://x/att/1?api-version=7.1", "a.png"));
+        """
+    )
+    assert out.count("?") == 1, out
+    assert "&fileName=a.png" in out
+
+
+def test_a_filename_with_spaces_or_unicode_is_escaped_into_the_query():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref("https://x/att/1", "bằng chứng cuối.png"));
+        """
+    )
+    assert " " not in out, "a raw space in the query breaks the link"
+    assert "%" in out
+
+
+def test_a_non_http_url_yields_no_link_at_all_rather_than_a_broken_one():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(JSON.stringify(evidenceHref("javascript:alert(1)", "x.png")));
+        """
+    )
+    assert out == "null", out
+
+
+def test_the_overflow_line_opens_the_rest_instead_of_only_counting_them():
+    """"+4 tệp nữa" that cannot be clicked tells the reader something is hidden and gives them
+    no way to see it — worse than not mentioning it."""
+    src = _board_html_text()
+    fn = re.search(r"function evidenceCell\(.*?\n\}\n", src, re.S)
+    assert fn, "evidenceCell() not found"
+    body = fn.group(0)
+    assert "onclick" in body or "details" in body, "the overflow line is inert"
