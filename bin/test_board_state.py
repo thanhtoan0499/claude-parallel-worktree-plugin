@@ -4354,3 +4354,30 @@ def test_a_bug_already_in_the_qc_queue_is_not_re_proposed_on_every_pump_cycle():
     from board_state import ticket_state_drift
 
     assert ticket_state_drift("Ready for QC verify on Stag", "Bug", "merged_not_closed") is None
+
+
+def test_the_published_drift_keeps_the_hand_off_the_rule_decided():
+    """_state_drift_doc() rebuilds the rule's dict to fold in a PR number. Anything it forgets to
+    copy is silently dropped on the way to ado_state_sync — which is how a QC hand-off becomes a
+    state change with nobody's name on it."""
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("Active", "Bug", "merged_not_closed", None, {"number": 719})
+    assert doc["proposed_state"] == "Ready for QC verify on Stag"
+    assert doc["assign_to"] == "QC"
+    assert doc["reason"] == "PR #719 đã merged"
+
+
+def test_a_review_block_names_the_pr_the_reader_has_to_open():
+    """"chờ approve PR" without a number sends the reader hunting for which one."""
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("Active", "Task", "waiting_review", None, {"number": 729})
+    assert doc["reason"] == "chờ approve PR #729"
+
+
+def test_a_state_only_drift_publishes_no_hand_off_rather_than_an_empty_one():
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("New", "Task", "waiting_review", None, {"number": 733})
+    assert doc["assign_to"] is None

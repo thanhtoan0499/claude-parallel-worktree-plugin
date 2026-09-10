@@ -891,6 +891,9 @@ _PR_PROVES_STARTED = frozenset({"waiting_review", "waiting_merge", "checks_faili
 # nothing: closing one is a judgement call, and this file never writes Closed.
 _QC_VERIFY_STATE = "Ready for QC verify on Stag"
 
+# The one reason phrase that takes its PR number as a suffix rather than a prefix.
+_REVIEW_BLOCK_PHRASE = "chờ approve PR"
+
 _PR_DRIFT_PHRASE = {
     "waiting_review": "đang chờ review",
     "waiting_merge": "đã sẵn sàng merge",
@@ -936,7 +939,7 @@ def ticket_state_drift(state, work_item_type, derived_status, has_block_reason=N
         if "Resolved" in allowed:
             return {"proposed_state": "Resolved", "reason": _PR_DRIFT_PHRASE[derived_status],
                     "fixable": True}
-        return {"proposed_state": "Blocked", "reason": "chờ approve PR", "fixable": True}
+        return {"proposed_state": "Blocked", "reason": _REVIEW_BLOCK_PHRASE, "fixable": True}
 
     if derived_status == "merged_not_closed":
         # Already in the QC queue: the hand-off happened, and re-proposing it every pump cycle
@@ -968,11 +971,16 @@ def _state_drift_doc(state, work_item_type, derived_status, has_block_reason, pr
         return None
     reason = drift["reason"]
     number = (pr or {}).get("number")
-    # Only the two PR-shaped reasons ever mention a PR — a Blocked-with-no-note reason has
-    # nothing to do with any PR that ticket happens to also carry.
-    if number is not None and reason in (*_PR_DRIFT_PHRASE.values(), "đã merged"):
-        reason = f"PR #{number} {reason}"
-    return {"proposed_state": drift["proposed_state"], "reason": reason, "fixable": drift["fixable"]}
+    # Only the PR-shaped reasons ever mention a PR — a Blocked-with-no-note reason has nothing to
+    # do with any PR that ticket happens to also carry. "chờ approve PR" takes the number as a
+    # suffix because that is where it reads as a sentence.
+    if number is not None:
+        if reason == _REVIEW_BLOCK_PHRASE:
+            reason = f"{reason} #{number}"
+        elif reason in (*_PR_DRIFT_PHRASE.values(), "đã merged"):
+            reason = f"PR #{number} {reason}"
+    return {"proposed_state": drift["proposed_state"], "reason": reason,
+            "assign_to": drift.get("assign_to"), "fixable": drift["fixable"]}
 
 
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
