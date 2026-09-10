@@ -165,12 +165,46 @@ def test_the_board_bundle_carries_no_image_bytes(tmp_path):
         b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)  # header is enough — nothing should read it
     m = _manifest(tmp_path)
     m["results"][0]["evidence"].append({"file": "shot.png", "proves": "màn hình sau khi sửa"})
-    out = json.dumps(bundle(m, tmp_path))
+    out = json.dumps(bundle(m, tmp_path, asset_map={}))
     assert "data:image" not in out
     assert len(out) < 8000, "the bundle is carrying something that is not prose"
 
 
 def test_the_board_bundle_keeps_the_link_to_the_original(tmp_path):
     m = _manifest(tmp_path)
-    out = bundle(m, tmp_path, {"log.txt": "https://dev.azure.com/agentiqai/x/_apis/wit/attachments/abc"})
+    out = bundle(m, tmp_path, {"log.txt": "https://dev.azure.com/agentiqai/x/_apis/wit/attachments/abc"},
+                 asset_map={})
     assert out["results"][0]["evidence"][0]["href"].endswith("download=false")
+
+
+def test_a_screenshot_with_an_asset_is_served_from_the_artifact_itself(tmp_path):
+    """The sandbox blocks images from other hosts, so the board can only show a screenshot the
+    artifact serves. A "/_blob/<id>" url is short enough to cross the mirror prompt intact."""
+    import hashlib
+
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+    digest = hashlib.sha256((tmp_path / "shot.png").read_bytes()).hexdigest()
+    m = _manifest(tmp_path)
+    m["results"][0]["evidence"].append({"file": "shot.png", "proves": "màn hình sau khi sửa"})
+
+    out = bundle(m, tmp_path, asset_map={digest: "/_blob/abc123"})
+    assert out["results"][0]["evidence"][1]["src"] == "/_blob/abc123"
+    assert "assets_missing" not in out
+
+
+def test_a_screenshot_with_no_asset_is_named_for_upload(tmp_path):
+    """Silently dropping it is how a board ends up with a report that looks complete and shows
+    nothing — the missing ones have to be nameable."""
+    (tmp_path / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+    m = _manifest(tmp_path)
+    m["results"][0]["evidence"].append({"file": "shot.png", "proves": "màn hình sau khi sửa"})
+
+    out = bundle(m, tmp_path, asset_map={})
+    assert out["assets_missing"] == ["shot.png"]
+    assert "src" not in out["results"][0]["evidence"][1]
+
+
+def test_a_missing_asset_map_is_not_an_error(tmp_path):
+    from evidence_report import read_asset_map
+
+    assert read_asset_map(tmp_path / "khong-co.json") == {}

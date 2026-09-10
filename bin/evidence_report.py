@@ -26,6 +26,7 @@ Schema → docs/evidence-report-template.md. dry-run is the default; --apply att
 """
 
 import base64
+import hashlib
 import html
 import io
 import json
@@ -58,6 +59,10 @@ UI_PATHS = ("apps/web/", "packages/ui/")
 # a tag in the html file and as literal "<b>" on the board. Rejecting it keeps one manifest
 # meaning one thing in both places.
 PROSE_MARKUP = "<"
+# sha256 -> "/_blob/<id>", written by whoever uploaded the image to the board artifact's asset
+# store. Keyed by content, not filename: the same screenshot submitted from two worktrees is one
+# asset, and a file that changes gets a new key rather than silently reusing a stale picture.
+ASSET_MAP_PATH = pathlib.Path.home() / ".config" / "board-mirror" / "asset-map.json"
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 MAX_IMAGE_WIDTH = 1100
 
@@ -321,22 +326,35 @@ def render(manifest: dict, base_dir, urls: dict | None = None) -> str:
 </main></body></html>"""
 
 
-def bundle(manifest: dict, base_dir, urls: dict | None = None) -> dict:
+def read_asset_map(path=None) -> dict[str, str]:
+    """The image-to-asset-url map, or {} when there is none. Never raises: a missing or malformed
+    map means screenshots render as links on the board, which is the state this file shipped in
+    before assets existed — a degraded report beats no report."""
+    try:
+        return json.loads(pathlib.Path(path or ASSET_MAP_PATH).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def bundle(manifest: dict, base_dir, urls: dict | None = None, asset_map: dict | None = None) -> dict:
     """The same report as `render()`, but as data the board can build with its own h() helper.
 
     The board cannot take the html: assigning innerHTML fails SILENTLY inside the artifact
     sandbox, which would leave a blank cell with no error anywhere.
 
-    TEXT ONLY, no embedded image bytes. The board's data reaches the artifact through a
+    Text and short urls only, never image BYTES. The board's data reaches the artifact through a
     `claude -p` session's prompt (bin/systemd/run-board-mirror.sh), so every byte here passes
     through a model's context on the way. A few KB of prose survives that verbatim; 135 KB of
     base64 does not — on 2026-09-10 the first bundle carrying screenshots came out the far end as
     a document the model had recomposed, with `evidence` emptied and two invented keys. Images
     therefore stay as `href` links to the ADO original (which opens fine in a tab) and are
-    embedded only in the standalone html a person downloads. Putting them on the board needs the
-    artifact asset store, not a bigger prompt.
+    embedded only in the standalone html a person downloads. On the board a screenshot is served
+    from the artifact's own asset store instead — same origin, so the sandbox's image-host block
+    does not apply — and this only carries the short "/_blob/<id>" url that store hands back.
+    Images with no asset yet are listed under `assets_missing` for whoever runs the uploads.
     """
     base, urls = pathlib.Path(base_dir), (urls or {})
+    assets = read_asset_map() if asset_map is None else asset_map
     out = json.loads(json.dumps(manifest))  # never mutate the caller's manifest
     for entries in ([(out.get("requirement") or {}).get("evidence") or []]
                     + [r.get("evidence") or [] for r in out.get("results") or []]):
@@ -344,11 +362,51 @@ def bundle(manifest: dict, base_dir, urls: dict | None = None) -> dict:
             name = e.get("file", "")
             if urls.get(name):
                 e["href"] = _ado_href(name, urls)
-            # `src` is deliberately NOT filled — see the docstring. The board's renderer still
-            # honours it, which is the seam for serving screenshots from the artifact asset store
-            # later; until then an image is a link like every other file.
+            # An "/_blob/<id>" url is a few dozen characters, so it crosses the prompt intact
+            # where the image itself never could. An image with no asset yet simply stays a link.
+            if name.lower().endswith(IMAGE_SUFFIXES):
+                digest = hashlib.sha256((base / name).read_bytes()).hexdigest()
+                if assets.get(digest):
+                    e["src"] = assets[digest]
+                else:
+                    out.setdefault("assets_missing", []).append(name)
     out["checklist_text"] = CHECKLIST_TEXT
     return out
+
+
+def drop_previous_reports(ticket, *, run=None) -> int:
+    """Remove the ticket's earlier report attachments, so resubmitting does not leave a pile of
+    near-identical files for QC to guess between. Returns how many were dropped.
+
+    Best-effort: a failed cleanup must never stop the new report from being attached — an extra
+    stale copy is untidy, a missing report is a blocked handover.
+    """
+    import subprocess
+
+    from attach_evidence import read_pat
+    from dashboard import _ADO_ORG, _ADO_PROJECT
+
+    run = run or subprocess.run
+    pat = read_pat()
+    base = f"{_ADO_ORG}/{_ADO_PROJECT}/_apis/wit/workitems/{ticket}"
+    try:
+        item = json.loads(run(["curl", "-sS", "-u", f":{pat}", f"{base}?$expand=relations&api-version=7.1"],
+                              capture_output=True, text=True, timeout=30).stdout)
+        stale = [i for i, r in enumerate(item.get("relations") or [])
+                 if r.get("rel") == "AttachedFile"
+                 and str((r.get("attributes") or {}).get("name") or "").startswith(f"report-AB{ticket}")]
+        if not stale:
+            return 0
+        # Descending, and guarded by the revision we read: an index removed first would shift
+        # every later one, and a concurrent edit would make all of them point at the wrong file.
+        patch = [{"op": "test", "path": "/rev", "value": item["rev"]}] + \
+                [{"op": "remove", "path": f"/relations/{i}"} for i in sorted(stale, reverse=True)]
+        out = run(["curl", "-sS", "-u", f":{pat}", "-X", "PATCH",
+                   "-H", "Content-Type: application/json-patch+json", "-d", json.dumps(patch),
+                   f"{base}?api-version=7.1"], capture_output=True, text=True, timeout=30).stdout
+        return len(stale) if "rev" in json.loads(out) else 0
+    except Exception:
+        return 0
 
 
 def fetch_attachment_urls(ticket) -> dict[str, str]:
@@ -426,6 +484,9 @@ def main(argv=None) -> int:
         from attach_evidence import attach_evidence
 
         note = f"Báo cáo xác minh AB#{manifest['ticket']} (D62-4)"
+        dropped = drop_previous_reports(manifest["ticket"])
+        if dropped:
+            print(f"evidence_report: gỡ {dropped} bản báo cáo cũ khỏi vé")
         # The html is what a person opens; the .json is what the board renders. Only the html gets
         # a PR comment — two links to the same report on one PR is noise.
         attach_evidence(manifest["ticket"], str(out), pr=args.pr or manifest.get("pr"),
