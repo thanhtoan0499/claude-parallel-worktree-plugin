@@ -602,7 +602,7 @@ def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
     ]
 
     assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720",
-                              "review": None, "checks": None}}
+                              "review": None, "checks": None, "merged_at": None}}
 
 
 def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
@@ -621,7 +621,7 @@ def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
 
     assert set(docs) == {"8196", "8197"}
     assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100",
-                           "review": None, "checks": None}
+                           "review": None, "checks": None, "merged_at": None}
     assert docs["8197"] == docs["8196"]
 
 
@@ -2136,7 +2136,7 @@ def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatc
     writes = json.loads(capsys.readouterr().out)
     tickets = [w for w in writes if w["collection"] == "tickets"]
     assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu",
-                                       "review": None, "checks": None}
+                                       "review": None, "checks": None, "merged_at": None}
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
@@ -3726,6 +3726,128 @@ def test_build_writes_wires_the_ledger_note_check_onto_blocked_tickets():
     assert by_id["2"]["state_drift"]["fixable"] is False
 
 
+# ---------------------------------------------------------------------------
+# Evidence (BRIEF-EVIDENCE-2.md) — get_ado_attachments() already exists; this wires it into
+# ticket_docs(), fetched only for tickets that could actually owe evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_owed_states_matches_the_brief():
+    from board_state import EVIDENCE_OWED_STATES
+
+    assert EVIDENCE_OWED_STATES == frozenset(
+        {"Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"}
+    )
+
+
+def test_ticket_docs_publish_evidence_beside_state():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8172", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8172": [
+            {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+        ]},
+    )
+    assert docs["8172"]["evidence"] == [
+        {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+    ]
+
+
+def test_ticket_docs_evidence_defaults_to_an_empty_list():
+    from board_state import ticket_docs
+
+    docs = ticket_docs([{"id": "1", "title": "x", "state": "Active"}], {})
+    assert docs["1"]["evidence"] == []
+
+
+def test_ticket_docs_evidence_is_empty_for_a_ticket_the_batch_never_mentioned():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8325", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8325": []},
+    )
+    assert docs["8325"]["evidence"] == []
+
+
+def test_ticket_docs_drops_a_malformed_evidence_entry_rather_than_raising():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"1": ["not a dict", {"name": "ok.png", "url": "u", "created": "c"}]},
+    )
+    assert docs["1"]["evidence"] == [{"name": "ok.png", "url": "u", "created": "c"}]
+
+
+def test_prs_by_ticket_carries_the_merge_date_for_evidence_freshness():
+    from board_state import prs_by_ticket
+
+    prs = [{"number": 700, "title": _pr_title("x", "1"), "state": "MERGED", "url": "u",
+            "mergedAt": "2026-08-26T09:00:00Z"}]
+    assert prs_by_ticket(prs)["1"]["merged_at"] == "2026-08-26T09:00:00Z"
+
+
+def test_build_writes_wires_evidence_onto_the_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "x", "state": "Resolved"}],
+        pr_by_ticket={}, now=1000.0,
+        evidence_by_ticket={"1": [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]},
+    )
+    doc = _writes_for(writes, "tickets")[0]["data"]
+    assert doc["evidence"] == [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]
+
+
+def test_collect_only_fetches_evidence_for_tickets_that_could_owe_it():
+    """Cost control per the brief: "đừng quét cả backlog" — New/Active/Blocked tickets never
+    even reach the evidence reader."""
+    from board_state import collect
+
+    seen_ids = []
+
+    def read_evidence(ids):
+        seen_ids.extend(ids)
+        return {i: [] for i in ids}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [
+            {"id": "1", "title": "a", "state": "New"},
+            {"id": "2", "title": "b", "state": "Active"},
+            {"id": "3", "title": "c", "state": "Blocked"},
+            {"id": "4", "title": "d", "state": "Resolved"},
+            {"id": "5", "title": "e", "state": "Closed"},
+        ],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert sorted(seen_ids) == ["4", "5"]
+
+
+def test_collect_calls_the_evidence_reader_with_no_ids_when_nothing_could_owe_it():
+    from board_state import collect
+
+    seen_ids = ["sentinel"]
+
+    def read_evidence(ids):
+        seen_ids.clear()
+        seen_ids.extend(ids)
+        return {}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [{"id": "1", "title": "a", "state": "Active"}],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert seen_ids == []
+
+
 # --- the derived status on the ticket document ---
 
 
@@ -4065,6 +4187,105 @@ def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
 
 
 
+# ---------------------------------------------------------------------------
+# evidenceDrift() — BRIEF-EVIDENCE-2.md Part 2. Pure, JS-only (its inputs — t.evidence, t.pr,
+# t.state — are all already on the published ticket doc, so there is nothing here a server-side
+# computation would add). "missing" and "stale" must read as different problems: this is exactly
+# how AB#6541 escaped QC for 14 days — screenshots dated before the fix does not prove the fix.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_prelude():
+    script = _board_html_script()
+    return _js_const("EVIDENCE_OWED_STATES", script) + "\n" + _js_function("evidenceDrift", script)
+
+
+def test_new_active_and_blocked_owe_nothing_regardless_of_evidence():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "New" }, [], null),
+          evidenceDrift({ state: "Active" }, [], null),
+          evidenceDrift({ state: "Blocked" }, [], null),
+        ]));
+        """
+    )
+    assert out == "[null,null,null]", out
+
+
+def test_zero_attachments_in_an_owed_state_is_missing():
+    for state in ("Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"):
+        out = _run_node(_evidence_prelude() + f'console.log(evidenceDrift({{state: "{state}"}}, [], null));')
+        assert out == "missing", state
+
+
+def test_having_any_evidence_with_no_pr_to_compare_against_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift({ state: "Resolved" },
+          [{ name: "x.png", url: "u", created: "2026-08-20T00:00:00Z" }], null));
+        """
+    )
+    assert out == "null", out
+
+
+def test_todays_real_case_6541_evidence_older_than_the_merge_is_stale():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "verify-goal-verbfirst.png", url: "u", created: "2026-08-25T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "stale", out
+
+
+def test_evidence_newer_than_the_merge_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "after-fix.png", url: "u", created: "2026-08-27T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_the_newest_attachment_is_what_gets_compared_against_the_merge_date():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" },
+           { name: "new.png", url: "u", created: "2026-08-27T00:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_missing_and_stale_are_told_apart():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "Resolved" }, [], { mergedAt: "2026-08-26T09:00:00Z" }),
+          evidenceDrift({ state: "Resolved" },
+            [{ name: "x.png", url: "u", created: "2026-08-01T00:00:00Z" }],
+            { mergedAt: "2026-08-26T09:00:00Z" }),
+        ]));
+        """
+    )
+    assert out == '["missing","stale"]', out
+
+
 def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
@@ -4198,9 +4419,10 @@ def _summary_prelude():
     parts = [
         _js_const("STEP_STATE_LABEL", script),
         _js_const("SUMMARY_BLOCKER", script),
+        _js_const("EVIDENCE_OWED_STATES", script),
     ]
     parts += [_js_function(name, script) for name in
-              ("assignmentForTicket", "stepState", "planSteps", "ticketSummary")]
+              ("assignmentForTicket", "stepState", "planSteps", "evidenceDrift", "ticketSummary")]
     return "\n".join(parts)
 
 
@@ -4269,16 +4491,81 @@ def test_ticket_summary_says_nobody_has_it_rather_than_leaving_the_cell_empty():
 
 
 def test_ticket_summary_of_a_finished_ticket_claims_nothing_is_left_to_chase():
-    """derived_status null is a real answer — printing a chase phrase there invites wasted work."""
+    """derived_status null is a real answer — printing a chase phrase there invites wasted work.
+    Evidence is fresh here on purpose: a Closed ticket is exactly one EVIDENCE_OWED_STATES covers,
+    so this fixture must actually be verified or the next test's CHƯA VERIFY would be meaningless."""
     out = _run_node(
         _summary_prelude()
         + """
         console.log(ticketSummary(
           { id: "100", state: "Closed", derived_status: null,
-            pr: { number: 700, state: "MERGED" } }, []));
+            pr: { number: 700, state: "MERGED", mergedAt: "2026-08-01T00:00:00Z" },
+            evidence: [{ name: "shot.png", url: "u", created: "2026-08-02T00:00:00Z" }] }, []));
         """
     )
     assert out == "xong", out
+
+
+# ---------------------------------------------------------------------------
+# ticketSummary()'s third clause (BRIEF-EVIDENCE-2.md Part 4) — reads evidenceDrift() directly,
+# never recomputes it, so this line and the "Bằng chứng" column can never disagree.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_brief_example_a_verified_missing_ticket_gets_chua_verify():
+    """The brief's own worked example, verbatim: "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY"."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "running",
+          plan: [{step:"a",state:"done"},{step:"b",state:"done"},{step:"c",state:"done"}] }];
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" }, evidence: [] },
+          assignments));
+        """
+    )
+    assert out == "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY", out
+
+
+def test_ticket_summary_flags_stale_evidence_the_same_way_as_missing():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" }] }, []));
+        """
+    )
+    assert out.endswith(" · CHƯA VERIFY"), out
+
+
+def test_ticket_summary_adds_nothing_when_the_ticket_does_not_owe_evidence():
+    """Not owed means not owed — no suffix, not even an empty one, for a ticket still in flight."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "waiting_review",
+            pr: { number: 732, state: "OPEN" } }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+
+
+def test_ticket_summary_adds_nothing_once_evidence_is_fresh():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "after.png", url: "u", created: "2026-08-27T00:00:00Z" }] }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+    assert out == "code đã merge · chờ QC xác nhận", out
 
 
 def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():
@@ -4381,3 +4668,77 @@ def test_a_state_only_drift_publishes_no_hand_off_rather_than_an_empty_one():
 
     doc = _state_drift_doc("New", "Task", "waiting_review", None, {"number": 733})
     assert doc["assign_to"] is None
+# The "Bằng chứng" column (BRIEF-EVIDENCE-2.md Part 3) — after Tóm tắt, before PR.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_cell_source():
+    script = _board_html_script()
+    body = re.search(r"^function evidenceCell\(.*?\n\}", script, re.S | re.M)
+    assert body, "evidenceCell() not found in board.html"
+    return body.group(0)
+
+
+def test_evidence_cell_reads_dash_for_a_ticket_that_owes_nothing():
+    """No green tick anywhere in this function — that would be noise on every not-yet-done row."""
+    src = _evidence_cell_source()
+    assert '"—"' in src
+    assert "✓" not in src and "✔" not in src and "tick" not in src.lower()
+
+
+def test_evidence_cell_shows_a_red_chip_for_missing_evidence():
+    src = _evidence_cell_source()
+    assert "pill-bad" in src
+    assert "chưa có bằng chứng" in src
+
+
+def test_evidence_cell_shows_a_yellow_chip_for_stale_evidence():
+    src = _evidence_cell_source()
+    assert "pill-warn" in src
+    assert "bằng chứng cũ hơn bản sửa" in src
+
+
+def test_evidence_cell_reads_evidence_drift_rather_than_recomputing_it():
+    """Part 4's own rule applies here too: one derivation, read everywhere."""
+    src = _evidence_cell_source()
+    assert "evidenceDrift(" in src
+
+
+def test_evidence_cell_links_straight_to_the_attachment_opening_a_new_tab():
+    src = _evidence_cell_source()
+    assert re.search(r'target:\s*"_blank"', src)
+    assert re.search(r'rel:\s*"noopener"', src)
+    assert re.search(r"href", src)
+    assert re.search(r"\.url\b", src), "the anchor is never built from the attachment's own url"
+
+
+def test_evidence_cell_shows_the_count_when_there_is_more_than_one():
+    src = _evidence_cell_source()
+    assert re.search(r"\.length\s*>\s*1", src), "no branch renders a count for more than one attachment"
+
+
+def test_evidence_column_sits_after_summary_and_before_pr():
+    script = _board_html_script()
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", script, re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "evidenceCell(" in src, "ticketRow() never renders the evidence cell"
+    summary_at = src.index("ticketSummary(")
+    evidence_at = src.index("evidenceCell(")
+    pr_at = src.index("ticketPrChip(")
+    assert summary_at < evidence_at < pr_at, "the evidence column is not between Tóm tắt and PR"
+
+    header = re.search(r"function ticketTable\(.*?\n\}\n", script, re.S).group(0)
+    assert '"Bằng chứng"' in header
+    assert header.index('"Tóm tắt"') < header.index('"Bằng chứng"') < header.index('"PR"')
+
+
+def test_evidence_wide_content_scrolls_in_its_own_container_not_the_page():
+    """Ticket 8172 alone carries 18 attachments — the row must never force the whole board to
+    scroll sideways. CSS lives in <style>, not <script> — read the raw file, not _board_html_script()."""
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    assert re.search(r"\.evidence-list\s*\{[^}]*overflow-x:\s*auto", html), (
+        "the evidence list has no own scroll container"
+    )
