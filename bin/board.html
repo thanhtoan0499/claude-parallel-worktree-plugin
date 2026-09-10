@@ -313,9 +313,17 @@
   /* Ticket 8172 alone carries 18 attachments — this scrolls inside its own cell so the row
      never forces the whole board (.table-wrap already scrolls too, but a single monster cell
      would still stretch every other column with it) to scroll sideways. */
-  .evidence-list { display: flex; align-items: center; gap: 4px; max-width: 220px; overflow-x: auto; white-space: nowrap; }
-  .evidence-list .chip { flex-shrink: 0; }
+  /* One file per line. The first shape was a 220px sideways scroller, which let a single long
+     attachment name fill the cell and hide every sibling behind a scrollbar the reader has to
+     notice, aim at and drag — once per row. Stacked and truncated, the count and the first
+     names are readable without any interaction at all; the full name is one hover away. */
+  .evidence-list { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; max-width: 230px; }
+  .evidence-list .chip {
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    display: block;
+  }
   .evidence-count { font-size: var(--fs-xs); color: var(--faint); white-space: nowrap; }
+  .evidence-more { font-size: var(--fs-xs); color: var(--faint); }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -1221,16 +1229,25 @@ function evidenceCell(t) {
   if (drift === "missing") return pill("pill-bad", "chưa có bằng chứng");
   if (drift === "stale") return pill("pill-warn", "bằng chứng cũ hơn bản sửa");
   if (!items.length) return "—";
+  // Nineteen files on one row is a wall, not a list. Show the first few and say how many are
+  // left — the ticket itself is one click away for the rest, and this column's job is to answer
+  // "is there proof" at a glance, not to be a file manager.
+  const SHOWN = 3;
+  const head = items.slice(0, SHOWN);
+  const rest = items.length - head.length;
   return h(
     "div", { class: "evidence-list" },
     items.length > 1 ? h("span", { class: "evidence-count" }, items.length + " tệp") : null,
-    items.map((e) => {
+    head.map((e) => {
       const href = safeHref(e.url);
       const label = e.name || "(không tên)";
+      // The full name on hover — truncation only works while the whole name stays reachable.
+      const title = e.created ? label + " · " + e.created : label;
       return href
-        ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title: e.created || null }, label)
-        : h("span", { class: "chip" }, label);
+        ? h("a", { class: "chip", href, target: "_blank", rel: "noopener", title }, label)
+        : h("span", { class: "chip", title }, label);
     }),
+    rest > 0 ? h("span", { class: "evidence-more" }, "+" + rest + " tệp nữa") : null,
   );
 }
 function ticketPrChip(pr) {

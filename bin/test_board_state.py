@@ -4683,7 +4683,7 @@ def test_evidence_cell_reads_dash_for_a_ticket_that_owes_nothing():
     """No green tick anywhere in this function — that would be noise on every not-yet-done row."""
     src = _evidence_cell_source()
     assert '"—"' in src
-    assert "✓" not in src and "✔" not in src and "tick" not in src.lower()
+    assert "✓" not in src and "✔" not in src, "a green tick on every done row is noise"
 
 
 def test_evidence_cell_shows_a_red_chip_for_missing_evidence():
@@ -4733,12 +4733,55 @@ def test_evidence_column_sits_after_summary_and_before_pr():
     assert header.index('"Tóm tắt"') < header.index('"Bằng chứng"') < header.index('"PR"')
 
 
-def test_evidence_wide_content_scrolls_in_its_own_container_not_the_page():
-    """Ticket 8172 alone carries 18 attachments — the row must never force the whole board to
-    scroll sideways. CSS lives in <style>, not <script> — read the raw file, not _board_html_script()."""
+def test_a_long_attachment_name_cannot_widen_the_backlog_table():
+    """Was: the cell got its own sideways scrollbar. That traded a wide table for a control the
+    reader has to notice, aim at and drag once per row — so the cell truncates instead, and this
+    still asserts the thing that actually mattered: one long name cannot push the column."""
+    src = _board_html_text()
+    block = re.search(r"\.evidence-list\s*\{([^}]*)\}", src)
+    assert block, ".evidence-list rule not found"
+    assert "max-width" in block.group(1), "nothing bounds the evidence column's width"
+    chip = re.search(r"\.evidence-list\s+\.chip\s*\{([^}]*)\}", src)
+    assert chip and "hidden" in chip.group(1), "a long filename is not clipped"
+
+
+# ---------------------------------------------------------------------------
+# The evidence cell as a list, not a scroller. Shipped as a 220px horizontal-overflow
+# strip: one long attachment name filled the whole cell and hid every sibling behind a
+# scrollbar the reader has to notice, aim at, and drag — per row.
+# ---------------------------------------------------------------------------
+
+
+def _board_html_text():
+    """The whole file, not just its <script> — these assertions are about the stylesheet."""
     import pathlib
 
-    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
-    assert re.search(r"\.evidence-list\s*\{[^}]*overflow-x:\s*auto", html), (
-        "the evidence list has no own scroll container"
-    )
+    return (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+
+
+def test_the_evidence_list_stacks_its_files_instead_of_scrolling_sideways():
+    src = _board_html_text()
+    block = re.search(r"\.evidence-list\s*\{([^}]*)\}", src)
+    assert block, ".evidence-list rule not found"
+    rule = block.group(1)
+    assert "overflow-x: auto" not in rule, "the cell still hides files behind a sideways scroll"
+    assert "column" in rule, "files are not stacked one per line"
+
+
+def test_a_long_attachment_name_is_truncated_rather_than_widening_the_column():
+    src = _board_html_text()
+    block = re.search(r"\.evidence-list\s+\.chip\s*\{([^}]*)\}", src)
+    assert block, ".evidence-list .chip rule not found"
+    rule = block.group(1)
+    assert "ellipsis" in rule, "a long filename is not truncated"
+    assert "max-width" in rule, "nothing bounds how wide one filename may push the column"
+
+
+def test_every_evidence_chip_carries_its_full_name_for_hover():
+    """Truncation only works if the full name is still reachable — otherwise the column trades
+    one unreadable state for another."""
+    src = _board_html_text()
+    fn = re.search(r"function evidenceCell\(.*?\n\}\n", src, re.S)
+    assert fn, "evidenceCell() not found"
+    assert re.search(r"\btitle\b", fn.group(0)), "no hover title on the evidence chips"
+    assert "e.name" in fn.group(0)
