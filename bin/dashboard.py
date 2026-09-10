@@ -370,7 +370,8 @@ def _ado_assignee_clause() -> str:
 
 def _ado_backlog_wiql() -> str:
     return (
-        "SELECT [System.Id], [System.Title], [System.State], [System.IterationPath], "
+        "SELECT [System.Id], [System.Title], [System.State], [System.WorkItemType], "
+        "[System.IterationPath], "
         "[System.AssignedTo], [Microsoft.VSTS.Common.ActivatedBy] FROM WorkItems "
         f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND {_ado_assignee_clause()} "
         "AND [System.State] <> 'Removed' "
@@ -386,6 +387,10 @@ def _shape_ado_ticket(raw: dict) -> dict:
         "id": ticket_id,
         "title": fields.get("System.Title") or "",
         "state": fields.get("System.State") or "",
+        # Every ticket_state_drift() rule keys on this: Bug has Resolved and a QC-verify state,
+        # Task has neither, and a type the rule cannot place makes it return None. Left out of
+        # the query, the rules were live and correct and fired on nothing.
+        "type": fields.get("System.WorkItemType") or "",
         # Only the leaf of the iteration path — "AgentIQ\\Sprint 57" is how ADO stores it and
         # "Sprint 57" is the only part anyone filters by. Tickets parked at the project root
         # have no sprint leaf to speak of and come back "".

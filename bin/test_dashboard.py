@@ -97,6 +97,7 @@ def test_shape_ado_ticket_extracts_known_fields():
             "System.Id": 8148,
             "System.State": "New",
             "System.Title": "Confirm agent run/trace tracked fields",
+            "System.WorkItemType": "Bug",
             "System.IterationPath": "AgentIQ\\Sprint 57",
         },
     }
@@ -105,6 +106,7 @@ def test_shape_ado_ticket_extracts_known_fields():
         "title": "Confirm agent run/trace tracked fields",
         "state": "New",
         "sprint": "Sprint 57",
+        "type": "Bug",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8148",
     }
 
@@ -115,6 +117,7 @@ def test_shape_ado_ticket_handles_missing_fields():
         "title": "",
         "state": "",
         "sprint": "",
+        "type": "",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1",
     }
 
@@ -1134,3 +1137,34 @@ def test_configured_identities_are_silent_and_union_every_one_of_them(capsys):
 
     assert "'a@x.com', 'b@y.com'" in clause and "@Me" not in clause
     assert capsys.readouterr().err == "", "the healthy path must not add a line to every run"
+
+
+# ---------------------------------------------------------------------------
+# The work-item type. ticket_state_drift() keys every one of its rules on it (Bug has
+# Resolved and a QC-verify state, Task has neither) — and shipped inert because the query
+# never asked for the field, so every real ticket reached the rule as type "".
+# ---------------------------------------------------------------------------
+
+
+def test_the_backlog_query_asks_for_the_work_item_type():
+    from dashboard import _ado_backlog_wiql
+
+    assert "[System.WorkItemType]" in _ado_backlog_wiql(), (
+        "without the type every drift rule silently no-ops on real data"
+    )
+
+
+def test_a_shaped_ticket_carries_its_work_item_type_through():
+    from dashboard import _shape_ado_ticket
+
+    shaped = _shape_ado_ticket({"id": 8309, "fields": {
+        "System.Title": "t", "System.State": "Active",
+        "System.WorkItemType": "Bug", "System.IterationPath": "AgentIQ\\Sprint 58"}})
+    assert shaped["type"] == "Bug"
+
+
+def test_a_ticket_whose_type_is_absent_shapes_to_empty_rather_than_missing():
+    """The key must exist either way — ticket_docs() reads it unconditionally."""
+    from dashboard import _shape_ado_ticket
+
+    assert _shape_ado_ticket({"id": 1, "fields": {}})["type"] == ""
