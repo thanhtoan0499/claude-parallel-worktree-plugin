@@ -179,7 +179,13 @@ parse_start_args() {
 # Globals rather than a printed tab-separated line: a prompt is multi-line, and a newline inside a
 # tab-delimited return would break the caller's read.
 parse_dispatch_args() {
-  DISPATCH_MODEL=""; DISPATCH_EFFORT=""; DISPATCH_PROMPT=""; DISPATCH_WORKTREE=""
+  # Every dispatched engineer runs on Opus at max effort unless the caller says otherwise. This
+  # is a standing decision, not a default worth re-arguing per task: a worker that reasons badly
+  # costs a re-dispatch and a wrong report, which is dearer than the tokens. Override with
+  # --model / --effort when a task genuinely does not need it.
+  DISPATCH_MODEL="${PARALLEL_TASK_MODEL:-opus}"
+  DISPATCH_EFFORT="${PARALLEL_TASK_EFFORT:-max}"
+  DISPATCH_PROMPT=""; DISPATCH_WORKTREE=""
   local -a positional=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -470,6 +476,7 @@ cmd_dispatch() {
 
   local -a launch=(cmew new "$task" "$wt_path")
   if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(-e "$DISPATCH_EFFORT"); fi
+  if [[ -n "$DISPATCH_MODEL" ]]; then launch+=(-m "$DISPATCH_MODEL"); fi
 
   local launch_out
   if ! launch_out="$( "${launch[@]}" 2>&1 )"; then
@@ -555,14 +562,8 @@ cmd_dispatch() {
     '{short_id:$sid, session_id:$fid}
        + (if $m == "" then {} else {model:$m} end)
        + (if $e == "" then {} else {effort:$e} end)')"
-  echo ">> $task dispatched: tmux $pane  session $session_id${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
+  echo ">> $task dispatched: tmux $pane  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
   echo "   attach and talk to it:  cmew a $task     (detach: Ctrl-b then d)"
-  if [[ -n "$DISPATCH_MODEL" ]]; then
-    # Said out loud rather than swallowed: cmew has no model flag, and a silently ignored
-    # --model is how a worker ends up on a different model than the dispatcher intended.
-    echo "   note: --model $DISPATCH_MODEL was IGNORED — cmew has no model flag; switch it" >&2
-    echo "         inside the session with /model, or launch it by hand." >&2
-  fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
