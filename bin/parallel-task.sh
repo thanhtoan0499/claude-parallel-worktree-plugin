@@ -458,6 +458,16 @@ cmd_dispatch() {
   # cmew boots an idle TUI and takes NO initial prompt, so the brief is written to a file inside
   # the worktree and sent with one short send-keys line — piping a long prompt through send-keys
   # escaping is how a brief arrives mangled.
+  # tmux hands a NEW session the SERVER's environment, not this shell's — so `env -u` here would
+  # do nothing. If the tmux server was ever started from inside a Claude session, its global
+  # environment still carries that session's markers, and every worker spawned afterwards
+  # inherits them: CLAUDE_CODE_SESSION_ID makes a worker claim the DISPATCHER's session id, and
+  # CLAUDE_CODE_CHILD_SESSION stops its transcript being saved at all. Scrub them at the source.
+  local v
+  for v in CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_PID CLAUDE_CODE_EXECPATH; do
+    tmux set-environment -g -u "$v" 2>/dev/null || true
+  done
+
   local -a launch=(cmew new "$task" "$wt_path")
   if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(-e "$DISPATCH_EFFORT"); fi
 
