@@ -3547,14 +3547,14 @@ def test_an_answered_escalation_stops_blocking_the_ticket():
 def test_board_gives_the_derived_status_its_own_ticket_column():
     script = _board_html_script()
     assert re.search(r"\bt\.derived_status\b", script), "board.html never reads the derived status"
-    assert "DERIVED_STATUS_LABEL" in script, "no Vietnamese gloss for the derived statuses"
+    assert "SUMMARY_BLOCKER" in script, "no Vietnamese gloss for the derived statuses"
 
 
 def test_board_labels_every_derived_status():
     from board_state import TICKET_STATUSES
 
     script = _board_html_script()
-    for name in ("DERIVED_STATUS_LABEL", "DERIVED_STATUS_TONE"):
+    for name in ("SUMMARY_BLOCKER",):
         block = re.search(r"const " + name + r" = \{(.*?)\};", script, re.S)
         assert block, f"board.html has no {name} map"
         for status in TICKET_STATUSES:
@@ -3565,9 +3565,13 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     """Both columns, always. The derived status answers "whose move"; the ADO state is what a
     person put there, and a board that quietly replaces one with the other hides the case where
     they disagree."""
-    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    script = _board_html_script()
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", script, re.S)
     assert body, "ticketRow() not found"
-    assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
+    assert "t.state" in body.group(1), "the ADO state column is gone"
+    summary = re.search(r"function ticketSummary\((.*?)\n\}\n", script, re.S)
+    assert summary, "ticketSummary() not found"
+    assert "t.derived_status" in summary.group(1), "the summary no longer reads the derived status"
 
 
 # ---------------------------------------------------------------------------
@@ -3747,105 +3751,9 @@ def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
     assert out == '["a1",null]', out
 
 
-def test_ticket_current_action_reads_the_running_step_from_a_claiming_assignment():
-    script = _board_html_script()
-    prelude = "\n".join(_js_function(name, script) for name in
-                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
-    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
-    prelude += "\n" + _js_function("ticketCurrentAction", script)
-    out = _run_node(
-        prelude
-        + """
-        const assignments = [{
-          id: "a1", ado_refs: ["100"],
-          plan: [{ step: "viết test đỏ", state: "done" }, { step: "chạy Playwright verify", state: "doing" }],
-        }];
-        console.log(ticketCurrentAction({ id: "100" }, assignments));
-        """
-    )
-    assert out == "chạy Playwright verify", out
 
 
-def test_ticket_current_action_says_no_runner_when_the_claiming_assignment_has_no_running_step():
-    """The exact same sentence the assignment card itself uses (NO_RUNNER_TEXT) — two places on
-    one page must never describe "nobody is running a step right now" differently."""
-    script = _board_html_script()
-    prelude = "\n".join(_js_function(name, script) for name in
-                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
-    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
-    prelude += "\n" + _js_function("ticketCurrentAction", script)
-    out = _run_node(
-        prelude
-        + """
-        const assignments = [{ id: "a1", ado_refs: ["100"], plan: [{ step: "x", state: "todo" }] }];
-        console.log(ticketCurrentAction({ id: "100" }, assignments));
-        """
-    )
-    assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
 
-
-def test_ticket_current_action_names_who_and_what_blocks_a_stalled_assignment():
-    """A blocked assignment must say WHO is blocking and ON WHAT, not "no step is running".
-
-    "chưa có bước nào đang chạy" is true of a blocked ticket and useless: it describes the board's
-    own bookkeeping instead of the thing the reader has to act on. When the manager has recorded a
-    reason, that reason is the answer — the generic sentence stays only for an assignment that has
-    genuinely stalled with nothing written down."""
-    script = _board_html_script()
-    prelude = "\n".join(_js_function(name, script) for name in
-                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
-    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
-    prelude += "\n" + _js_function("ticketCurrentAction", script)
-    out = _run_node(
-        prelude
-        + """
-        const blocked = [{ id: "a1", ado_refs: ["100"], status: "blocked",
-                           note: "CHẶN BỞI: Minh — chờ chốt quy tắc sản phẩm",
-                           plan: [{ step: "x", state: "todo" }] }];
-        console.log(ticketCurrentAction({ id: "100" }, blocked));
-        """
-    )
-    assert out == "CHẶN BỞI: Minh — chờ chốt quy tắc sản phẩm", out
-
-
-def test_ticket_current_action_still_says_no_runner_when_a_block_has_no_recorded_reason():
-    """A blocked assignment with no note is a gap in the manager's own record, and must keep
-    reading as one rather than inventing a reason or rendering an empty cell."""
-    script = _board_html_script()
-    prelude = "\n".join(_js_function(name, script) for name in
-                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
-    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
-    prelude += "\n" + _js_function("ticketCurrentAction", script)
-    out = _run_node(
-        prelude
-        + """
-        const blocked = [{ id: "a1", ado_refs: ["100"], status: "blocked", note: "   ",
-                           plan: [{ step: "x", state: "todo" }] }];
-        console.log(ticketCurrentAction({ id: "100" }, blocked));
-        """
-    )
-    assert out == _js_const("NO_RUNNER_TEXT", script).split('"')[1], out
-
-
-def test_ticket_current_action_infers_the_next_move_when_nobody_has_claimed_the_ticket():
-    script = _board_html_script()
-    prelude = "\n".join(_js_function(name, script) for name in
-                         ("assignmentForTicket", "stepState", "planSteps", "stepText", "doingSteps"))
-    prelude = _js_const("STEP_STATE_LABEL", script) + "\n" + _js_const("NO_RUNNER_TEXT", script) + "\n" + prelude
-    prelude += "\n" + _js_function("ticketCurrentAction", script)
-    out = _run_node(
-        prelude
-        + """
-        const rows = [
-          { id: "1", state: "Blocked" },
-          { id: "2", pr: { state: "OPEN" } },
-          { id: "3", derived_status: "unclaimed" },
-          { id: "4", state: "Active" },
-        ];
-        console.log(JSON.stringify(rows.map((t) => ticketCurrentAction(t, []))));
-        """
-    )
-    assert out == '["đang bị chặn — chờ người xử lý","chờ review / merge PR","cần giao việc",null]', out
 
 
 def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
@@ -3859,12 +3767,6 @@ def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
     assert "jumpToAssignment(" in src, "the link never opens/highlights the target card"
     assert re.search(r"claimant\s*\?", src), "an unclaimed ticket must fall back to plain text, not a dead link"
 
-
-def test_ticket_row_gains_a_dedicated_dang_lam_gi_column():
-    src = _board_html_script()
-    assert "Đang làm gì" in src, "no 'Đang làm gì' header"
-    body = re.search(r"function ticketRow\((.*?)\n\}\n", src, re.S)
-    assert body and "ticketCurrentAction(" in body.group(1), "ticketRow never renders the current-action cell"
 
 
 def test_assignment_card_has_a_stable_anchor_id():
@@ -3974,3 +3876,108 @@ def test_board_only_offers_an_answer_control_on_a_record_still_waiting_for_a_hum
     assert guard, "answerControls() has no single answerable guard"
     for required in ('esc.status === "needs_human"', "esc.answer == null", "options.length"):
         assert required in guard.group(1), f"the answer gate does not check {required}"
+
+
+# ---------------------------------------------------------------------------
+# One "Tóm tắt" cell replaces "Chờ ai" + "Đang làm gì": how far it got, and what
+# stands in the way — with the step-by-step detail left to the assignment card below.
+# ---------------------------------------------------------------------------
+
+
+def _summary_prelude():
+    script = _board_html_script()
+    parts = [
+        _js_const("STEP_STATE_LABEL", script),
+        _js_const("SUMMARY_BLOCKER", script),
+    ]
+    parts += [_js_function(name, script) for name in
+              ("assignmentForTicket", "stepState", "planSteps", "ticketSummary")]
+    return "\n".join(parts)
+
+
+def test_ticket_summary_pairs_step_progress_with_who_the_ticket_is_waiting_on():
+    """The two halves a manager actually reads: how far, and who holds it now."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "running",
+          plan: [{step: "sửa", state: "done"}, {step: "test", state: "done"},
+                 {step: "PR", state: "doing"}] }];
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "waiting_review",
+            pr: { number: 732, state: "OPEN" } }, assignments));
+        """
+    )
+    assert out == "xong 2/3 bước · chờ TL duyệt PR #732", out
+
+
+def test_ticket_summary_lets_a_recorded_block_reason_speak_for_the_whole_cell():
+    """A block already names who and on what — appending a derived phrase would only dilute it."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "blocked",
+          note: "CHẶN BỞI: Minh — chờ trả lời FR-25",
+          plan: [{step: "sửa", state: "done"}] }];
+        console.log(ticketSummary({ id: "100", state: "Blocked" }, assignments));
+        """
+    )
+    assert out == "CHẶN BỞI: Minh — chờ trả lời FR-25", out
+
+
+def test_ticket_summary_names_qc_once_the_code_is_merged_but_the_ticket_is_not_closed():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED" } }, []));
+        """
+    )
+    assert out == "code đã merge · chờ QC xác nhận", out
+
+
+def test_ticket_summary_shouts_when_the_next_move_belongs_to_the_person_reading_the_board():
+    """An escalation is the one status whose whole point is that it is waiting on the reader."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Blocked", derived_status: "waiting_decision" }, []));
+        """
+    )
+    assert out == "CẦN ANH QUYẾT", out
+
+
+def test_ticket_summary_says_nobody_has_it_rather_than_leaving_the_cell_empty():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary({ id: "100", state: "New", derived_status: "unclaimed" }, []));
+        """
+    )
+    assert out == "chưa giao việc", out
+
+
+def test_ticket_summary_of_a_finished_ticket_claims_nothing_is_left_to_chase():
+    """derived_status null is a real answer — printing a chase phrase there invites wasted work."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Closed", derived_status: null,
+            pr: { number: 700, state: "MERGED" } }, []));
+        """
+    )
+    assert out == "xong", out
+
+
+def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():
+    """Source check: the merge is only real if the two old headers are gone from the table."""
+    script = _board_html_script()
+    body = re.search(r"function ticketTable\(.*?\n\}\n", script, re.S)
+    assert body, "ticketTable() not found"
+    assert '"Chờ ai"' not in body.group(0), "the 'Chờ ai' column survived the merge"
+    assert '"Đang làm gì"' not in body.group(0), "the 'Đang làm gì' column survived the merge"
+    assert '"Tóm tắt"' in body.group(0), "no 'Tóm tắt' column replaced them"
+    assert '"Loại"' not in body.group(0), "the 'Loại' column is still there"

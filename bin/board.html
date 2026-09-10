@@ -477,19 +477,19 @@ const BLOCKED_KIND_LABEL = {
 // question and only that question: whose move is it now. "Active" answers it for nobody, which is
 // how five tickets — one needing a merge click, one a reviewer, one a product decision, one a
 // push — all read identically.
-const DERIVED_STATUS_LABEL = {
-  waiting_decision: "chờ quyết định", checks_failing: "CI đang đỏ",
-  waiting_merge: "chờ bấm merge", waiting_review: "chờ review",
-  merged_not_closed: "đã merge, vé chưa đóng", waiting_push: "chờ đẩy code lên",
-  unclaimed: "chưa ai nhận",
-};
-// `waiting_merge` is green and not merely "another state": it is the only one of these whose next
-// move belongs to the person reading the board, so it has to be findable at a glance.
-const DERIVED_STATUS_TONE = {
-  waiting_decision: "pill-bad", checks_failing: "pill-bad",
-  waiting_merge: "pill-good", waiting_review: "pill-accent",
-  merged_not_closed: "pill-warn", waiting_push: "pill-warn",
-  unclaimed: "pill-neutral",
+
+// The second half of a Backlog row's "Tóm tắt": whose move it is, said as a move rather than as
+// a phase name — the same seven keys ticket_status() emits, turned into the sentence a manager
+// acts on rather than the phase's name. `null` is
+// deliberately absent — a ticket with nothing left to chase is handled by ticketSummary() itself.
+const SUMMARY_BLOCKER = {
+  waiting_decision: "CẦN ANH QUYẾT",
+  checks_failing: "CI đỏ — phải sửa trước khi review",
+  waiting_merge: "đã duyệt — chờ bấm merge",
+  waiting_review: "chờ TL duyệt",
+  merged_not_closed: "chờ QC xác nhận",
+  waiting_push: "chờ đẩy code lên",
+  unclaimed: "chưa giao việc",
 };
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
@@ -873,7 +873,7 @@ function looseSessions(assignments, sessions) {
 
 /* ---------- assignments: the ledger, and the sessions working it ---------- */
 // What a plan step is doing right now — shared between the assignment card below and the
-// Backlog's "Đang làm gì" column (ticketCurrentAction(), near ticketRow()) so the two can never
+// Backlog's "Tóm tắt" column (ticketSummary(), near ticketRow()) so the two can never
 // describe the same running step differently. Same fallback-to-unknown rule sessionTile() uses
 // for a session state nobody has labelled.
 function stepState(s) {
@@ -888,10 +888,6 @@ function stepText(s) {
 function doingSteps(a) {
   return planSteps(a).filter((s) => stepState(s) === "doing");
 }
-// assignmentCard() below keeps its own copy of this exact sentence — a source-text test pins the
-// literal inside that function specifically, so this constant (used by ticketCurrentAction()
-// instead) is a second copy on purpose. Keep the two in sync by hand if the wording ever changes.
-const NO_RUNNER_TEXT = "chưa có bước nào đang chạy";
 
 function assignmentCard(a, sessions) {
   const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
@@ -1113,33 +1109,40 @@ function assignmentForTicket(ticketId, assignments) {
     a.ado_refs.some((r) => String(r) === String(ticketId)));
 }
 
-// "Đang làm gì": the running step of whoever holds the ticket, or the next move when nobody
-// does. The running-step half reads doingSteps()/stepText() — the exact derivation the assignment
-// card itself uses — so the two can never describe the same step differently. The no-claimant
-// half only restates what the board already computed elsewhere (t.state, t.pr.state,
-// t.derived_status) — no new source of truth, and "suy không ra" stays null for the caller to
-// print as "—".
-function ticketCurrentAction(t, assignments) {
+// One cell, two halves: how far the work got, and what stands in the way. It deliberately does
+// NOT list the running step — that detail lives on the assignment card below, and repeating it
+// here made the row long enough that the blocker (the part worth acting on) scrolled out of view.
+//
+// A recorded block reason wins outright. It already names who is blocking and on what, which is
+// strictly more than any derived phrase can say; pairing the two would dilute the specific with
+// the generic.
+function ticketSummary(t, assignments) {
   const claimant = assignmentForTicket(t.id, assignments);
+  if (claimant && claimant.status === "blocked" && String(claimant.note || "").trim()) {
+    return String(claimant.note).trim();
+  }
+
+  const blocker = t.derived_status ? SUMMARY_BLOCKER[t.derived_status] || t.derived_status : null;
+  // Nothing left to chase. "xong" is a claim the row can stand behind: derived_status is null
+  // only when the ticket is done AND its PR merged (see ticket_status in board_state.py).
+  if (!blocker) return "xong";
+
+  // The PR number belongs to whoever has to open it, so it rides along with the review/merge ask
+  // rather than sitting in a column of its own repeating the same number.
+  const withPr = (t.pr && t.pr.number && (t.derived_status === "waiting_review" ||
+    t.derived_status === "waiting_merge" || t.derived_status === "checks_failing"))
+    ? blocker + " PR #" + t.pr.number
+    : blocker;
+
+  const progress = [];
   if (claimant) {
     const steps = planSteps(claimant);
-    if (!steps.length) return "chưa ai chia bước";
-    const doing = doingSteps(claimant);
-    if (doing.length) return doing.map(stepText).join(" · ");
-    // A blocked assignment's whole point is WHO is blocking and ON WHAT. Saying "no step is
-    // running" there describes the board's own bookkeeping and leaves the reader to open the
-    // ticket and read comments to learn the one thing they came for. The note is the manager's
-    // recorded reason; falling through to NO_RUNNER_TEXT when there is none keeps a gap in that
-    // record reading as a gap rather than as an empty cell.
-    if (claimant.status === "blocked" && String(claimant.note || "").trim()) {
-      return String(claimant.note).trim();
-    }
-    return NO_RUNNER_TEXT;
+    const done = steps.filter((s) => stepState(s) === "done").length;
+    progress.push(steps.length ? "xong " + done + "/" + steps.length + " bước" : "chưa chia bước");
+  } else if (t.pr && t.pr.state === "MERGED") {
+    progress.push("code đã merge");
   }
-  if (t.pr && t.pr.state === "OPEN") return "chờ review / merge PR";
-  if (t.state === "Blocked") return "đang bị chặn — chờ người xử lý";
-  if (t.derived_status === "unclaimed") return "cần giao việc";
-  return null;
+  return progress.length ? progress.join(" · ") + " · " + withPr : withPr;
 }
 
 // A Backlog row's "Chờ ai" cell jumps here: opens the assignment card's closed <details> and
@@ -1176,10 +1179,7 @@ function ticketRow(t, opts) {
   // The one place a Backlog row jumps to the card actually working it — assignmentForTicket()
   // is the join, assignmentCard()'s "assign-"+id is the anchor it jumps to.
   const claimant = assignmentForTicket(t.id, view.assignments);
-  const waitingPill = t.derived_status
-    ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
-           DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
-    : "—";
+  const summary = ticketSummary(t, view.assignments);
   const cells = [
     h("td", { class: "num" }, href
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
@@ -1192,15 +1192,15 @@ function ticketRow(t, opts) {
     h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
     // A live claim turns the pill into a jump to that card — a more specific answer to the exact
     // question this column already asks. No claim, no link: a dead href is worse than plain text.
+    // A live claim turns the summary into a jump to the card running it — the step-by-step detail
+    // this cell deliberately leaves out is exactly what that card holds.
     h("td", {}, claimant
       ? h("a", {
-          href: "#assign-" + claimant.id, style: "text-decoration:none;",
+          href: "#assign-" + claimant.id, style: "text-decoration:none; color:inherit;",
           title: "Xem card đang chạy việc này", onclick: () => jumpToAssignment(claimant.id),
-        }, waitingPill)
-      : waitingPill),
-    h("td", {}, ticketCurrentAction(t, view.assignments) || "—"),
+        }, summary)
+      : summary),
     h("td", {}, t.sprint || "—"),
-    h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
   ];
   if (opts.showHolder) cells.push(h("td", {}, t.handed_off_to || "—"));
@@ -1210,11 +1210,9 @@ function ticketTable(rows, opts) {
   opts = opts || {};
   const headers = [
     h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
-    h("th", { title: "Việc này đang chờ ai ra tay — bảng tự suy ra từ PR, escalation và sổ giao việc" },
-      "Chờ ai"),
-    h("th", { title: "Bước đang chạy của người đang cầm vé — hoặc việc cần làm tiếp nếu chưa ai nhận" },
-      "Đang làm gì"),
-    h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
+    h("th", { title: "Đã tới đâu và đang vướng ai — bấm để mở card đang chạy việc này" },
+      "Tóm tắt"),
+    h("th", {}, "Sprint"), h("th", {}, "PR"),
   ];
   if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
   return h("div", { class: "table-wrap" },
