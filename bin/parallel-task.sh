@@ -17,22 +17,39 @@
 # after a manual `docker compose down` or crash can't cause a collision), track
 # which worktree owns which number, and give one place to list/stop/remove them.
 #
+# What this script does NOT do any more is give a worker its brief. Briefing is a message, and a
+# shell cannot send one: SendMessage is a Claude tool, and both shell-side stand-ins for it are
+# dead ends — `claude --resume <id> -p` spawns a headless one-shot on the transcript that the live
+# tmux session never sees, and send-keys types into a TUI where every newline in a brief submits a
+# half-finished prompt. So `dispatch` provisions, records, and prints the worker's EXACT agent name;
+# a resident manager session (`manager-start`) does the briefing over SendMessage.
+#
 # Usage:
-#   parallel-task.sh start    <task-name> <native|docker> [base-ref] [--ticket <id> ...]
-#   parallel-task.sh dispatch <task-name> <prompt> [--worktree <path>] [--model <model>] [--effort low|medium|high|xhigh|max]
-#   parallel-task.sh list     [--json]
-#   parallel-task.sh stop     <task-name>
-#   parallel-task.sh rm       <task-name> [--force]
+#   parallel-task.sh start         <task-name> <native|docker> [base-ref] [--ticket <id> ...]
+#   parallel-task.sh dispatch      <task-name> <prompt> [--worktree <path>] [--model <model>] [--effort low|medium|high|xhigh|max]
+#   parallel-task.sh manager-start
+#   parallel-task.sh list          [--json]
+#   parallel-task.sh stop          <task-name>
+#   parallel-task.sh rm            <task-name> [--force]
 set -euo pipefail
 
 usage() {
-  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKTREES_DIR="$REPO_ROOT/.claude/worktrees"
 REGISTRY="$WORKTREES_DIR/.parallel-registry.json"
+
+# The resident manager: one cmew session named `manager`, so tmux session `cc-manager` and display
+# name "Manager 🔹", running in the repo root rather than a worktree because it dispatches work and
+# does not do it. Opus at max effort is a standing decision, not a per-run choice — this is the
+# session that decides what every worker is told, and a cheap manager writes expensive briefs.
+MANAGER_TASK="manager"
+MANAGER_MODEL="opus"
+MANAGER_EFFORT="max"
+MANAGER_CHARTER="skills/engineering-manager/SKILL.md"   # relative: cmew opens the session in REPO_ROOT
 
 mkdir -p "$WORKTREES_DIR"
 [[ -f "$REGISTRY" ]] || echo '{}' > "$REGISTRY"
@@ -150,6 +167,104 @@ copy_worktreeinclude() {
     mkdir -p "$(dirname "$dest/$rel")"
     cp "$src" "$dest/$rel"
   done < "$REPO_ROOT/.worktreeinclude"
+}
+
+# --- tmux panes + agent identity ---------------------------------------------
+
+tmux_session_exists() {
+  # Exact match on the session name. NOT `tmux has-session -t X`: -t resolves its argument the way
+  # every other tmux target does, so it answers yes for `cc-manager` when only `cc-manager-2` is
+  # alive — and a duplicate-manager guard that can be fooled by a longer name is no guard.
+  tmux list-sessions -F '#S' 2>/dev/null | grep -qxF "$1"
+}
+
+scrub_inherited_claude_env() {
+  # tmux hands a NEW session the SERVER's environment, not this shell's — so `env -u` here would
+  # do nothing. If the tmux server was ever started from inside a Claude session, its global
+  # environment still carries that session's markers, and every session spawned afterwards
+  # inherits them: CLAUDE_CODE_SESSION_ID makes a worker claim the DISPATCHER's session id, and
+  # CLAUDE_CODE_CHILD_SESSION stops its transcript being saved at all. Scrub them at the source.
+  local v
+  for v in CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_PID CLAUDE_CODE_EXECPATH; do
+    tmux set-environment -g -u "$v" 2>/dev/null || true
+  done
+}
+
+pane_has() { tmux capture-pane -p -t "$1" 2>/dev/null | grep -qF "$2"; }
+
+wait_for_pane() {  # <pane> <needle> <seconds>
+  local deadline=$((SECONDS + $3))
+  while ((SECONDS < deadline)); do
+    pane_has "$1" "$2" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_tui() {
+  # wait_for_tui <pane> <cmew-name> — non-zero (and loud) if the session never reached a prompt.
+  #
+  # Wait for the TUI, do not sleep at it. The first version of this used fixed sleeps and typed
+  # into a pane that had not finished booting — the session sat at an empty prompt looking exactly
+  # like one that had been told nothing, which is the failure mode the move off `claude --bg` was
+  # meant to end. The trust-folder dialog a fresh worktree raises comes BEFORE that prompt: one
+  # keypress here, a silent hang under --bg.
+  local pane="$1" name="$2"
+  if wait_for_pane "$pane" "trust" 8; then
+    tmux send-keys -t "$pane" Down
+    sleep 1
+    tmux send-keys -t "$pane" Enter
+  fi
+  wait_for_pane "$pane" "❯" 90 && return 0
+  echo "error: '$name' never reached a prompt in tmux session $pane" >&2
+  echo "       attach and see what it is waiting on: cmew a $name" >&2
+  return 1
+}
+
+resolve_agent_identity() {
+  # resolve_agent_identity <cmew-name> -> "<sessionId><TAB><display name>", empty when unknown.
+  #
+  # Both halves come off the SAME agent row on purpose. The session id is what the board joins on;
+  # the display name is what SendMessage addresses, and it cannot be derived from the task name
+  # here — cmew title-cases the codename and appends its emoji (` 🔹` unless the codename is in its
+  # pool), and at effort ultracode prepends `🔥 `. SendMessage matches that string EXACTLY, so
+  # `T8471` is refused where the real name is `T8471 🔹`. Reading the name back beats keeping a
+  # second copy of cmew's naming rule in a second language.
+  #
+  # The match is a case-insensitive PREFIX, not equality, for the same reason: the row for task
+  # `t8419-slug` is named "T8419-slug 🔹". A miss shows an empty card on the board and says nothing
+  # about why, so it is worth being lenient here and exact at the SendMessage end.
+  claude agents --json --all 2>/dev/null \
+    | jq -r --arg n "$1" '
+        [.[] | select((.name // "") | ascii_downcase | startswith($n | ascii_downcase))]
+        | sort_by(.startedAt) | last
+        | select(. != null)
+        | "\(.sessionId // "")\t\(.name // "")"' 2>/dev/null || true
+}
+
+session_registry_patch() {
+  # session_registry_patch <session-id> <agent-name> <model> <effort> — what a launch adds to a
+  # registry row, as one JSON object.
+  #
+  # agent_name is stored, never re-derived: it is the address a manager or a worker has to type
+  # into SendMessage verbatim, emoji included. short_id is written empty because nothing prints one
+  # any more (it came from `claude --bg`); consumers already fall back to the agent id.
+  jq -n --arg sid "$1" --arg name "$2" --arg m "$3" --arg e "$4" \
+    '{short_id:"", session_id:$sid, agent_name:$name}
+       + (if $m == "" then {} else {model:$m} end)
+       + (if $e == "" then {} else {effort:$e} end)'
+}
+
+task_status() {
+  # task_status <task> <mode> <num> <gateway-port> — "running" | "stopped".
+  #
+  # A manager row owns no dev stack and no ports, so its liveness IS its tmux session; reporting it
+  # off a null gateway port would print "stopped" at a manager that is answering messages.
+  case "$2" in
+    docker)  docker_slot_busy "$3" && echo running || echo stopped ;;
+    manager) tmux_session_exists "cc-$1" && echo running || echo stopped ;;
+    *)       port_busy "$4" && echo running || echo stopped ;;
+  esac
 }
 
 # --- commands -----------------------------------------------------------------
@@ -311,11 +426,7 @@ cmd_list() {
     fe="$(reg_get --arg k "$task" '.[$k].ports.frontend')"
     gw="$(reg_get --arg k "$task" '.[$k].ports.gateway')"
     ports="fe:${fe} gw:${gw}"
-    if [[ "$mode" == "docker" ]]; then
-      docker_slot_busy "$num" && status="running" || status="stopped"
-    else
-      port_busy "$gw" && status="running" || status="stopped"
-    fi
+    status="$(task_status "$task" "$mode" "$num" "$gw")"
     printf '%-24s %-10s %-40s %-8s %-30s %s\n' "$task" "$mode" "$branch" "$num" "$ports" "$status"
   done <<< "$tasks"
 }
@@ -337,11 +448,7 @@ list_json() {
       mode="$(jq -r '.mode' <<<"$entry")"
       num="$(jq -r '.num' <<<"$entry")"
       gw="$(jq -r '.ports.gateway' <<<"$entry")"
-      if [[ "$mode" == "docker" ]]; then
-        docker_slot_busy "$num" && dev_status="running" || dev_status="stopped"
-      else
-        port_busy "$gw" && dev_status="running" || dev_status="stopped"
-      fi
+      dev_status="$(task_status "$task" "$mode" "$num" "$gw")"
       session_id="$(jq -r '.session_id // empty' <<<"$entry")"
       agent_obj="{}"
       if [[ -n "$session_id" ]]; then
@@ -460,19 +567,7 @@ cmd_dispatch() {
   # --bg session cannot be attached, cannot receive a message, and hides every permission prompt
   # it stalls on. Five silent stalls on 2026-09-09 cost 5-25 minutes each, and three workers had
   # to be killed and re-dispatched from scratch because a wrong brief could not be corrected.
-  #
-  # cmew boots an idle TUI and takes NO initial prompt, so the brief is written to a file inside
-  # the worktree and sent with one short send-keys line — piping a long prompt through send-keys
-  # escaping is how a brief arrives mangled.
-  # tmux hands a NEW session the SERVER's environment, not this shell's — so `env -u` here would
-  # do nothing. If the tmux server was ever started from inside a Claude session, its global
-  # environment still carries that session's markers, and every worker spawned afterwards
-  # inherits them: CLAUDE_CODE_SESSION_ID makes a worker claim the DISPATCHER's session id, and
-  # CLAUDE_CODE_CHILD_SESSION stops its transcript being saved at all. Scrub them at the source.
-  local v
-  for v in CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_PID CLAUDE_CODE_EXECPATH; do
-    tmux set-environment -g -u "$v" 2>/dev/null || true
-  done
+  scrub_inherited_claude_env
 
   local -a launch=(cmew new "$task" "$wt_path")
   if [[ -n "$DISPATCH_EFFORT" ]]; then launch+=(-e "$DISPATCH_EFFORT"); fi
@@ -486,46 +581,89 @@ cmd_dispatch() {
   fi
 
   local pane="cc-$task"
+  wait_for_tui "$pane" "$task" || exit 1
 
-  # Wait for the TUI, do not sleep at it. The first version of this used fixed sleeps and the
-  # brief was typed into a pane that had not finished booting — the worker sat at an empty prompt
-  # looking exactly like one that had been told nothing. Which is the whole failure mode this
-  # switch away from `claude --bg` was meant to end.
-  pane_has() { tmux capture-pane -p -t "$pane" 2>/dev/null | grep -qF "$1"; }
-  wait_for_pane() {  # <needle> <seconds>
-    local deadline=$((SECONDS + $2))
-    while ((SECONDS < deadline)); do
-      pane_has "$1" && return 0
-      sleep 1
-    done
-    return 1
-  }
+  # The brief is WRITTEN here and delivered by nobody — that split is the whole point of this
+  # command now. cmew boots an idle TUI that takes no initial prompt, and neither way a shell could
+  # speak to it afterwards works: `claude --resume <id> -p` spawns a headless one-shot the live
+  # session never sees, and send-keys types into the TUI, where a brief's newlines each submit a
+  # half-finished prompt and its backticks get eaten by the shell before tmux ever sees them.
+  # Delivery is a SendMessage from the manager (a Claude session, so it HAS the tool); this file is
+  # what that message points the worker at, and the agent name printed below is its address.
+  local brief_path="$wt_path/BRIEF.md"
+  printf '%s\n' "$prompt" > "$brief_path"
 
-  # A fresh worktree raises a trust-folder dialog before the prompt ever appears. Answering it is
-  # one keypress here and a silent hang under --bg.
-  if wait_for_pane "trust" 8; then
-    tmux send-keys -t "$pane" Down
-    sleep 1
-    tmux send-keys -t "$pane" Enter
-  fi
-  if ! wait_for_pane "❯" 90; then
-    echo "error: '$task' never reached a prompt in tmux session $pane" >&2
-    echo "       attach and see what it is waiting on: cmew a $task" >&2
+  # cmew renames the session for display and the rename takes a moment to reach `claude agents`;
+  # reading it immediately returns nothing.
+  sleep 3
+  local identity session_id agent_name
+  identity="$(resolve_agent_identity "$task")"
+  IFS=$'\t' read -r session_id agent_name <<< "$identity"
+  if [[ -z "$session_id" ]]; then
+    echo "error: launched '$task' into tmux session $pane, but could not resolve its session_id" >&2
+    echo "       via 'claude agents --json'. Attach and check it started: cmew a $task" >&2
     exit 1
   fi
 
-  # The brief goes in a file and only a one-line pointer through send-keys: a long prompt piped
-  # through send-keys escaping arrives mangled, and a mangled brief is worse than none.
-  local brief_path="$wt_path/BRIEF.md"
-  printf '%s\n' "$prompt" > "$brief_path"
-  local nudge="Đọc BRIEF.md trong thư mục này rồi làm theo. Xong thì để báo cáo ở tin nhắn cuối và đừng thoát phiên."
+  reg_merge_entry "$task" "$(session_registry_patch "$session_id" "$agent_name" "$DISPATCH_MODEL" "$DISPATCH_EFFORT")"
+  echo ">> $task provisioned: tmux $pane  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
+  echo "   SendMessage target (exact name, copy it verbatim):  $agent_name"
+  echo "   brief written to $brief_path — NOT delivered; a shell cannot send a message."
+  echo "   brief it from the manager:  SendMessage to \"$agent_name\": Đọc BRIEF.md trong thư mục này rồi làm theo."
+  echo "   attach and talk to it:  cmew a $task     (detach: Ctrl-b then d)"
+}
+
+cmd_manager_start() {
+  # Bring up the resident manager. Everything else in this script provisions a place for work to
+  # happen; this provisions the session that decides what work happens, and it is the only session
+  # that has to be reachable without SendMessage — workers message it, but the CTO's desktop
+  # session has no SendMessage at all and there is no second manager to ask.
+  [[ $# -eq 0 ]] || {
+    echo "error: manager-start takes no arguments — $MANAGER_MODEL at effort $MANAGER_EFFORT is the standing decision" >&2
+    exit 1
+  }
+
+  local pane="cc-$MANAGER_TASK"
+  if tmux_session_exists "$pane"; then
+    # Resident means one. A second manager would take assignments off the same ledger and brief the
+    # same workers with no idea the first exists, and whichever one a worker happens to message
+    # decides what it hears.
+    echo "error: $pane is already running — the manager is resident, one at a time is the point" >&2
+    echo "       walk in and talk to it:   cmew a $MANAGER_TASK   (detach: Ctrl-b then d)" >&2
+    echo "       replace it deliberately:  cmew kill $MANAGER_TASK && $0 manager-start" >&2
+    exit 1
+  fi
+  [[ -f "$REPO_ROOT/$MANAGER_CHARTER" ]] || {
+    echo "error: no charter at $REPO_ROOT/$MANAGER_CHARTER" >&2
+    echo "       a manager session without its SKILL.md is just a chat window — refusing to start one" >&2
+    exit 1
+  }
+
+  scrub_inherited_claude_env
+
+  local launch_out
+  if ! launch_out="$( cmew new "$MANAGER_TASK" "$REPO_ROOT" -e "$MANAGER_EFFORT" -m "$MANAGER_MODEL" 2>&1 )"; then
+    echo "error: cmew failed to launch the manager:" >&2
+    echo "$launch_out" >&2
+    exit 1
+  fi
+
+  wait_for_tui "$pane" "$MANAGER_TASK" || exit 1
+
+  # The only send-keys delivery left in this script, and it is here because nothing else can reach
+  # this session. It sends a POINTER, never the charter itself: SKILL.md is 400 lines, and each of
+  # its newlines through send-keys would submit a separate half-finished prompt. The path is
+  # relative because cmew opened the session in REPO_ROOT.
+  local charter_line="Đọc $MANAGER_CHARTER rồi nhận vai đó và bắt đầu trực. Đừng thoát phiên."
   local sent=0 attempt
   for attempt in 1 2 3; do
-    tmux send-keys -t "$pane" "$nudge"
+    tmux send-keys -t "$pane" "$charter_line"
     sleep 1
-    # Typed, not just fired: confirm the text actually reached the input box before pressing
-    # Enter. Fire-and-hope is how a dispatched worker ends up idle with an empty prompt.
-    if pane_has "Đọc BRIEF.md"; then
+    # Typed, not just fired: confirm the text actually reached the input box before pressing Enter.
+    # Fire-and-hope is how a session ends up idle at an empty prompt, looking exactly like one that
+    # was told nothing. The needle is the path, early in the line, so a pane that wraps the rest of
+    # the sentence still matches.
+    if pane_has "$pane" "$MANAGER_CHARTER"; then
       tmux send-keys -t "$pane" Enter
       sent=1
       break
@@ -533,37 +671,35 @@ cmd_dispatch() {
     sleep 2
   done
   if ((sent == 0)); then
-    echo "error: dispatched '$task' but its brief never reached the input box in $pane" >&2
-    echo "       the brief is at $brief_path — send it by hand: cmew a $task" >&2
+    echo "error: the manager is up in $pane but its charter never reached the input box" >&2
+    echo "       send it by hand: cmew a $MANAGER_TASK, then type: $charter_line" >&2
     exit 1
   fi
 
-  local short_id=""
-
-  local session_id
-  # cmew renames the session for display — "t8419-slug" is reported as "T8419-slug 🔹" — so the
-  # exact-name match that worked for `claude --bg` finds nothing here. Matching case-insensitively
-  # on the leading name is what keeps the registry join (board_state.session_docs) working; a
-  # miss shows an empty card on the board and says nothing about why.
   sleep 3
-  session_id="$(claude agents --json --all \
-    | jq -r --arg n "$task" '
-        [.[] | select((.name // "") | ascii_downcase | startswith($n | ascii_downcase))]
-        | sort_by(.startedAt) | last | .sessionId // empty')" || true
+  local identity session_id agent_name
+  identity="$(resolve_agent_identity "$MANAGER_TASK")"
+  IFS=$'\t' read -r session_id agent_name <<< "$identity"
   if [[ -z "$session_id" ]]; then
-    echo "error: dispatched '$task' into tmux session $pane, but could not resolve its session_id" >&2
-    echo "       via 'claude agents --json'. Attach and check it started: cmew a $task" >&2
+    echo "error: the manager is up in $pane but its session_id could not be resolved via" >&2
+    echo "       'claude agents --json'. Attach and check it started: cmew a $MANAGER_TASK" >&2
     exit 1
   fi
 
-  reg_merge_entry "$task" "$(jq -n \
-    --arg sid "$short_id" --arg fid "$session_id" \
-    --arg m "$DISPATCH_MODEL" --arg e "$DISPATCH_EFFORT" \
-    '{short_id:$sid, session_id:$fid}
-       + (if $m == "" then {} else {model:$m} end)
-       + (if $e == "" then {} else {effort:$e} end)')"
-  echo ">> $task dispatched: tmux $pane  session $session_id${DISPATCH_MODEL:+  model $DISPATCH_MODEL}${DISPATCH_EFFORT:+  effort $DISPATCH_EFFORT}"
-  echo "   attach and talk to it:  cmew a $task     (detach: Ctrl-b then d)"
+  # A registry row so every consumer that already walks the registry — the board, a worker looking
+  # up who to escalate to — finds the manager by name and gets its exact SendMessage address.
+  # `branch` stays null: the manager runs in the repo root, whose branch is whatever the CTO last
+  # checked out, so recording it would be stale within the hour. `adopted: true` is the
+  # load-bearing field — it is what stops `stop`/`rm manager` from running a dev-stack teardown and
+  # `git worktree remove` against the repo root itself.
+  reg_set_entry "$MANAGER_TASK" "$(jq -n --arg path "$REPO_ROOT" \
+    --argjson patch "$(session_registry_patch "$session_id" "$agent_name" "$MANAGER_MODEL" "$MANAGER_EFFORT")" \
+    '{branch:null, path:$path, mode:"manager", num:null, ports:null, ado_ids:[], adopted:true} + $patch')"
+
+  echo ">> manager up: tmux $pane  session $session_id  model $MANAGER_MODEL  effort $MANAGER_EFFORT"
+  echo "   SendMessage target (exact name, copy it verbatim):  $agent_name"
+  echo "   charter delivered: $MANAGER_CHARTER"
+  echo "   walk in and talk to it:  cmew a $MANAGER_TASK     (detach: Ctrl-b then d)"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -572,6 +708,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   case "$COMMAND" in
     start)    cmd_start "$@" ;;
     dispatch) cmd_dispatch "$@" ;;
+    manager-start) cmd_manager_start "$@" ;;
     list)     cmd_list "$@" ;;
     stop)     cmd_stop "$@" ;;
     rm)       cmd_rm "$@" ;;

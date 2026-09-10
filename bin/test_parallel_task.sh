@@ -41,17 +41,25 @@ fi
 
 # --- parse_dispatch_args --------------------------------------------------
 
+# The defaults below are opus/max on purpose — a worker that reasons badly costs a re-dispatch and
+# a wrong report, which is dearer than the tokens. An operator's own PARALLEL_TASK_* would override
+# them and turn every expectation here red, so this block asks for the built-in default explicitly.
+unset PARALLEL_TASK_MODEL PARALLEL_TASK_EFFORT
+
 parse_dispatch_args "do the thing"
-assert_eq "dispatch: prompt only" "||do the thing" "$DISPATCH_MODEL|$DISPATCH_EFFORT|$DISPATCH_PROMPT"
+assert_eq "dispatch: prompt only takes the standing opus/max default" "opus|max|do the thing" \
+  "$DISPATCH_MODEL|$DISPATCH_EFFORT|$DISPATCH_PROMPT"
 
 parse_dispatch_args "do it" --model opus --effort max
 assert_eq "dispatch: both flags" "opus|max|do it" "$DISPATCH_MODEL|$DISPATCH_EFFORT|$DISPATCH_PROMPT"
 
 parse_dispatch_args "do it" --model sonnet
-assert_eq "dispatch: model only" "sonnet|" "$DISPATCH_MODEL|$DISPATCH_EFFORT"
+assert_eq "dispatch: --model overrides, effort keeps its default" "sonnet|max" \
+  "$DISPATCH_MODEL|$DISPATCH_EFFORT"
 
 parse_dispatch_args "do it" --effort low
-assert_eq "dispatch: effort only" "|low" "$DISPATCH_MODEL|$DISPATCH_EFFORT"
+assert_eq "dispatch: --effort overrides, model keeps its default" "opus|low" \
+  "$DISPATCH_MODEL|$DISPATCH_EFFORT"
 
 parse_dispatch_args "$(printf 'line one\nline two')" --effort high
 assert_eq "dispatch: multi-line prompt survives" "$(printf 'line one\nline two')" "$DISPATCH_PROMPT"
@@ -86,7 +94,7 @@ fi
 
 parse_dispatch_args "exactly one quoted prompt with --model inside it"
 assert_eq "dispatch: a quoted prompt containing a flag word stays intact" \
-  "|exactly one quoted prompt with --model inside it" "$DISPATCH_MODEL|$DISPATCH_PROMPT"
+  "opus|exactly one quoted prompt with --model inside it" "$DISPATCH_MODEL|$DISPATCH_PROMPT"
 
 if parse_dispatch_args unquoted prompt words 2>/dev/null; then
   echo "FAIL: a multi-word unquoted prompt should return non-zero"; fail=1
@@ -181,5 +189,97 @@ task_is_adopted already-there && r=yes || r=no
 assert_eq "task_is_adopted: false for a provisioned row" "no" "$r"
 task_is_adopted missing && r=yes || r=no
 assert_eq "task_is_adopted: false for a row that is not there" "no" "$r"
+
+# --- dispatch provisions; it does not brief ------------------------------------
+#
+# A shell cannot deliver a brief. `claude --resume <id> -p` spawns a headless one-shot the live
+# tmux session never sees, and send-keys types into a TUI where a brief's newlines each submit a
+# half-finished prompt. So the keystroke delivery is gone and the brief is a FILE that the manager
+# points the worker at over SendMessage — dispatch's job ends at provisioning and recording.
+
+assert_eq "dispatch: no keystroke delivery left in cmd_dispatch" "0" \
+  "$(declare -f cmd_dispatch | grep -c 'send-keys' || true)"
+
+if declare -f cmd_dispatch | grep -q 'BRIEF.md'; then
+  echo "PASS dispatch: still writes BRIEF.md, which is what the manager points the worker at"
+else
+  echo "FAIL dispatch: BRIEF.md is not written — a briefing message would have nothing to point at"
+  fail=1
+fi
+
+if grep -q 'manager-start) cmd_manager_start' "$SCRIPT_DIR/parallel-task.sh"; then
+  echo "PASS manager-start: the subcommand is routed, not just defined"
+else
+  echo "FAIL manager-start: cmd_manager_start exists but no subcommand reaches it"; fail=1
+fi
+
+# --- the exact agent name is recorded, never re-derived ------------------------
+#
+# SendMessage matches the DISPLAY name exactly, emoji included — sending to `T8471` is refused when
+# the real name is `T8471 🔹`. cmew's rule (title-case the codename, append its emoji, prepend `🔥 `
+# at effort ultracode) stays in cmew: the name is read back off `claude agents` and stored, so
+# there is one copy of it and not two.
+
+patch="$(session_registry_patch "sid-1" "T8471 🔹" opus max)"
+assert_eq "registry patch: the agent name is stored verbatim, emoji and all" \
+  "T8471 🔹" "$(jq -r '.agent_name' <<<"$patch")"
+assert_eq "registry patch: session_id, model and effort ride along" "sid-1|opus|max" \
+  "$(jq -r '"\(.session_id)|\(.model)|\(.effort)"' <<<"$patch")"
+
+patch="$(session_registry_patch "sid-2" "Manager 🔹" "" "")"
+assert_eq "registry patch: an unset model/effort adds no key" "false|false" \
+  "$(jq -r '"\(has("model"))|\(has("effort"))"' <<<"$patch")"
+assert_eq "registry patch: the name lands even with no model/effort" \
+  "Manager 🔹" "$(jq -r '.agent_name' <<<"$patch")"
+
+# `claude agents --json` stubbed: the id and the display name must come off the SAME row, and the
+# newest one, or the registry addresses one session and joins another.
+claude() {
+  [[ "$1" == "agents" ]] || return 1
+  cat <<'JSON'
+[{"name": "T8471 🔹",       "sessionId": "sid-old",   "startedAt": 1},
+ {"name": "t8471-retry 🔹", "sessionId": "sid-new",   "startedAt": 2},
+ {"name": "🔥 Tornado 🌀",  "sessionId": "sid-other", "startedAt": 3}]
+JSON
+}
+assert_eq "resolve_agent_identity: newest matching row, id and exact display name together" \
+  "$(printf 'sid-new\tt8471-retry 🔹')" "$(resolve_agent_identity t8471)"
+assert_eq "resolve_agent_identity: no match is empty, not a row of nulls" \
+  "" "$(resolve_agent_identity nobody)"
+unset -f claude
+
+# --- manager-start: resident means exactly one ---------------------------------
+
+tmux() { return 1; }   # no sessions at all, so only the argument guard can refuse
+if out="$(cmd_manager_start --model sonnet 2>&1)"; then
+  echo "FAIL manager-start: an unexpected argument should refuse, not be ignored"; fail=1
+else
+  case "$out" in
+    *"takes no arguments"*) echo "PASS manager-start: refuses an argument instead of ignoring it" ;;
+    *) echo "FAIL manager-start: wrong refusal for an argument, got: $out"; fail=1 ;;
+  esac
+fi
+
+tmux() { [[ "$1" == "list-sessions" ]] && printf 'cc-manager\ncc-t8471\n'; return 0; }
+if out="$(cmd_manager_start 2>&1)"; then
+  echo "FAIL manager-start: a second manager should refuse — two would brief the same workers blind"
+  fail=1
+else
+  echo "PASS manager-start: refuses while cc-manager is already up"
+fi
+case "$out" in
+  *"cmew a manager"*) echo "PASS manager-start: the refusal says how to walk into the running one" ;;
+  *) echo "FAIL manager-start: refusal never printed 'cmew a manager', got: $out"; fail=1 ;;
+esac
+
+# A longer session name is not the manager — `tmux has-session -t cc-manager` would say it is, which
+# is why the guard reads the session list itself.
+tmux() { [[ "$1" == "list-sessions" ]] && printf 'cc-manager-2\n'; return 0; }
+tmux_session_exists cc-manager && r=yes || r=no
+assert_eq "tmux_session_exists: a longer session name is not a match" "no" "$r"
+tmux() { [[ "$1" == "list-sessions" ]] && printf 'cc-manager\n'; return 0; }
+tmux_session_exists cc-manager && r=yes || r=no
+assert_eq "tmux_session_exists: the exact name is a match" "yes" "$r"
+unset -f tmux
 
 [[ $fail -eq 0 ]] && echo "all passed" || { echo "FAILURES ABOVE"; exit 1; }

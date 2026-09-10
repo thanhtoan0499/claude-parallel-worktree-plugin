@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""assert-based checks for manager prompt building, decision parsing, and argv. Run: python3 bin/test_manager.py"""
+"""assert-based checks for manager prompt building, decision parsing, and waking the manager.
+Run: python3 bin/test_manager.py"""
 
 import json
 import os
+import sys
+import time
 
+import manager_daemon
 from escalations import new_record
 from manager import (
     build_prompt,
     parse_decision,
-    resume_argv,
     validate_decision,
 )
 
@@ -198,23 +201,6 @@ def test_validate_decision_rejects_non_dict():
     r = new_record("s", "red_tests", "q")
     assert validate_decision(None, r) is not None
     assert validate_decision(["a"], r) is not None
-
-
-def test_resume_argv_targets_the_session():
-    argv = resume_argv("sess-abc", "the answer")
-    assert os.path.basename(argv[0]) == "claude"  # absolute now; see manager_session.claude_bin()
-    assert "--resume" in argv
-    assert argv[argv.index("--resume") + 1] == "sess-abc"
-    assert "-p" in argv
-    assert argv[-1] == "the answer"
-
-
-def test_resume_argv_separates_the_message_so_a_leading_dash_is_not_read_as_a_flag():
-    """-p is a boolean flag and the message is positional; a decision option can start with a
-    dash (e.g. "--help"), and without -- it is parsed as a flag instead of delivered."""
-    argv = resume_argv("sess-abc", "--help")
-    assert argv[-3:] == ["-p", "--", "--help"]
-    assert argv.index("--") > argv.index("--resume"), "every flag must precede the separator"
 
 
 def test_parse_decision_handles_nested_objects():
@@ -628,13 +614,18 @@ def test_a_failed_call_quoting_decision_shaped_evidence_still_reaches_a_human():
     assert "manager call failed" in out["reason"], out
 
 
-def test_manager_no_longer_spawns_a_throwaway_process():
+def test_manager_only_judges_and_never_delivers():
+    """`claude --resume <id> -p -- <msg>` spawns a NEW headless process on the worker's
+    transcript: it runs one turn and exits without ever reaching the live tmux session the worker
+    is sitting in, while racing the worker's own process for that transcript. Delivery belongs to
+    the manager session, which holds SendMessage — so no delivery path may grow back here."""
     import manager
 
     for gone in ("manager_argv", "run_manager", "MANAGER_MODEL"):
         assert not hasattr(manager, gone), f"{gone} should have moved or been removed"
-    assert hasattr(manager, "resume_argv"), "delivering into a worker session is still manager.py's job"
-    assert hasattr(manager, "deliver_answer")
+    for name in dir(manager):
+        assert "deliver" not in name and "resume" not in name, f"{name}: delivery is the manager session's job"
+    assert not hasattr(manager, "subprocess"), "manager.py spawns nothing any more"
 
 
 def test_finished_sessions_fires_once_on_the_transition_to_idle():
@@ -753,14 +744,14 @@ def test_wake_pass_leaves_a_failed_wake_unmarked_so_it_fires_again():
     store, read_seen, write_seen = _seen_store({"w1": "busy"})
     calls = []
 
-    def failing_ask(text, source):
-        calls.append(source)
-        raise RuntimeError("manager busy")
+    def failing_wake(text):
+        calls.append(text)
+        raise md.ManagerUnreachable("text never reached the input box of cc-manager")
 
     for _ in range(2):
         md.wake_pass(
             0,
-            ask=failing_ask,
+            wake=failing_wake,
             agents_fn=lambda: [agent],
             known_fn=lambda: {"w1"},
             open_fn=list,
@@ -768,7 +759,7 @@ def test_wake_pass_leaves_a_failed_wake_unmarked_so_it_fires_again():
             read_seen=read_seen,
             write_seen=write_seen,
         )
-    assert calls == ["daemon:worker-finished", "daemon:worker-finished"], "must retry every pass"
+    assert [c[:20] for c in calls] == ["Worker 'worker-1' (s"] * 2, "must retry every pass"
     assert store.get("w1") == "busy", "a failed wake must not be marked seen"
 
 
@@ -779,13 +770,12 @@ def test_wake_pass_marks_a_successful_wake_so_it_does_not_fire_again():
     store, read_seen, write_seen = _seen_store({"w1": "busy"})
     calls = []
 
-    def ok_ask(text, source):
-        calls.append(source)
-        return True, "on it"
+    def ok_wake(text):
+        calls.append(text)
 
     md.wake_pass(
         0,
-        ask=ok_ask,
+        wake=ok_wake,
         agents_fn=lambda: [agent],
         known_fn=lambda: {"w1"},
         open_fn=list,
@@ -793,13 +783,13 @@ def test_wake_pass_marks_a_successful_wake_so_it_does_not_fire_again():
         read_seen=read_seen,
         write_seen=write_seen,
     )
-    assert calls == ["daemon:worker-finished"]
+    assert len(calls) == 1 and calls[0].startswith("Worker 'worker-1'")
     assert store.get("w1") == "idle", "a delivered wake must be marked seen"
 
     calls.clear()
     md.wake_pass(
         0,
-        ask=ok_ask,
+        wake=ok_wake,
         agents_fn=lambda: [agent],
         known_fn=lambda: {"w1"},
         open_fn=list,
@@ -819,7 +809,7 @@ def test_wake_pass_never_wakes_a_session_outside_the_registry():
 
     md.wake_pass(
         0,
-        ask=lambda text, source: calls.append(source),
+        wake=lambda text: calls.append(text),
         agents_fn=lambda: [agent],
         known_fn=set,
         open_fn=list,
@@ -833,13 +823,13 @@ def test_wake_pass_never_wakes_a_session_outside_the_registry():
 def test_wake_pass_retries_a_failed_tick_sooner_than_a_full_interval():
     import manager_daemon as md
 
-    def failing_ask(text, source):
-        raise RuntimeError("manager busy")
+    def failing_wake(text):
+        raise md.ManagerUnreachable("cc-manager showed no prompt within 90s")
 
     now = 10_000.0
     new_last_tick = md.wake_pass(
         0,
-        ask=failing_ask,
+        wake=failing_wake,
         agents_fn=list,
         known_fn=set,
         open_fn=lambda: [{"id": "a1"}],
@@ -858,14 +848,13 @@ def test_wake_pass_returns_now_after_a_successful_tick():
 
     calls = []
 
-    def ok_ask(text, source):
-        calls.append(source)
-        return True, "on it"
+    def ok_wake(text):
+        calls.append(text)
 
     now = 5_000.0
     new_last_tick = md.wake_pass(
         0,
-        ask=ok_ask,
+        wake=ok_wake,
         agents_fn=list,
         known_fn=set,
         open_fn=lambda: [{"id": "a1"}],
@@ -873,47 +862,8 @@ def test_wake_pass_returns_now_after_a_successful_tick():
         read_seen=dict,
         write_seen=lambda seen: None,
     )
-    assert calls == ["daemon:tick"]
+    assert len(calls) == 1 and calls[0].startswith("Tick.")
     assert new_last_tick == now
-
-
-def test_wake_pass_treats_a_failed_ask_result_as_a_failed_wake_not_a_delivered_one():
-    """manager_session.ask_result returns (False, note) on a subprocess failure instead of
-    raising — only ManagerBusy raises. A wake pass that only guards with try/except reads that
-    as success and never re-detects the notification."""
-    import manager_daemon as md
-
-    agent = {"sessionId": "w1", "name": "worker-1", "status": "idle"}
-    store, read_seen, write_seen = _seen_store({"w1": "busy"})
-
-    md.wake_pass(
-        0,
-        ask=lambda text, source: (False, "manager call failed: timed out"),
-        agents_fn=lambda: [agent],
-        known_fn=lambda: {"w1"},
-        open_fn=list,
-        now_fn=lambda: 0,
-        read_seen=read_seen,
-        write_seen=write_seen,
-    )
-    assert store.get("w1") == "busy", "a failed wake must not be marked seen"
-
-
-def test_wake_pass_treats_a_failed_ask_result_tick_as_a_failure_not_a_success():
-    import manager_daemon as md
-
-    now = 10_000.0
-    new_last_tick = md.wake_pass(
-        0,
-        ask=lambda text, source: (False, "manager call failed: timed out"),
-        agents_fn=list,
-        known_fn=set,
-        open_fn=lambda: [{"id": "a1"}],
-        now_fn=lambda: now,
-        read_seen=dict,
-        write_seen=lambda seen: None,
-    )
-    assert new_last_tick != now, "a failed tick must not be recorded as if it had succeeded"
 
 
 def test_wake_pass_does_not_tick_on_a_busy_session_outside_the_registry():
@@ -925,7 +875,7 @@ def test_wake_pass_does_not_tick_on_a_busy_session_outside_the_registry():
     calls = []
     new_last_tick = md.wake_pass(
         0,
-        ask=lambda text, source: calls.append(source),
+        wake=lambda text: calls.append(text),
         agents_fn=lambda: [agent],
         known_fn=set,
         open_fn=list,
@@ -945,13 +895,12 @@ def test_wake_pass_ticks_on_a_registry_worker_running_via_state_with_an_empty_le
     agent = {"sessionId": "w1", "name": "worker-1", "state": "working"}
     calls = []
 
-    def ok_ask(text, source):
-        calls.append(source)
-        return True, "on it"
+    def ok_wake(text):
+        calls.append(text)
 
     new_last_tick = md.wake_pass(
         0,
-        ask=ok_ask,
+        wake=ok_wake,
         agents_fn=lambda: [agent],
         known_fn=lambda: {"w1"},
         open_fn=list,  # 0 assignments in the ledger
@@ -959,7 +908,7 @@ def test_wake_pass_ticks_on_a_registry_worker_running_via_state_with_an_empty_le
         read_seen=dict,
         write_seen=lambda seen: None,
     )
-    assert calls == ["daemon:tick"], "a registry worker still running must keep the tick alive"
+    assert len(calls) == 1 and calls[0].startswith("Tick."), "a registry worker still running must keep the tick alive"
     assert new_last_tick == md.TICK_SECONDS + 1
 
 
@@ -1086,13 +1035,13 @@ def test_repeated_tick_failures_widen_the_gap_and_a_success_clears_it():
 
     md.reset_tick_failures()
 
-    def failing_ask(text, source):
-        raise RuntimeError("manager busy")
+    def failing_wake(text):
+        raise md.ManagerUnreachable("cc-manager showed no prompt within 90s")
 
-    def run(ask, now):
+    def run(wake, now):
         return md.wake_pass(
             0,
-            ask=ask,
+            wake=wake,
             agents_fn=list,
             known_fn=set,
             open_fn=lambda: [{"id": "a1"}],
@@ -1102,17 +1051,310 @@ def test_repeated_tick_failures_widen_the_gap_and_a_success_clears_it():
         )
 
     now = 10_000.0
-    first = run(failing_ask, now)
-    second = run(failing_ask, now)
+    first = run(failing_wake, now)
+    second = run(failing_wake, now)
     # the second failure must not be retried as eagerly as the first
     assert md.should_tick(second, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is False
     assert md.should_tick(first, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is True
 
-    def ok_ask(text, source):
-        return True, "done"
+    def ok_wake(text):
+        return None
 
-    run(ok_ask, now)
-    after = run(failing_ask, now)
+    run(ok_wake, now)
+    after = run(failing_wake, now)
     # a success clears the streak, so the next failure is back to the eager retry
     assert md.should_tick(after, now + md.TICK_RETRY_SECONDS, open_count=1, running_count=0) is True
     md.reset_tick_failures()
+
+
+class _FakeTmux:
+    """A tmux stand-in for wake_manager: capture-pane shows what the pane holds, send-keys types
+    into it. The knobs reproduce the two ways a real pane loses a message — it is not at a prompt
+    yet, and send-keys reporting success while nothing reaches the input box."""
+
+    def __init__(self, ready_after=0, lands_after=1, pane="", enter_fails=False):
+        self.pane = pane
+        self.ready_after = ready_after  # captures before the prompt appears
+        self.lands_after = lands_after  # send-keys attempts before the text echoes; 0 = never
+        self.enter_fails = enter_fails
+        self.captures = 0
+        self.typed = []
+        self.enters = 0
+        self.calls = []
+
+    def run(self, argv, **kw):
+        import subprocess
+        from types import SimpleNamespace
+
+        assert argv[0] == "tmux", argv
+        if argv[1] == "has-session":
+            # The pane this fake models exists; "not there" is covered by its own test.
+            self.calls.append("has-session")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1] == "capture-pane":
+            self.captures += 1
+            self.calls.append("capture")
+            prompt = "❯\n" if self.captures > self.ready_after else ""
+            return SimpleNamespace(returncode=0, stdout=prompt + self.pane, stderr="")
+        if "-l" not in argv:
+            self.calls.append("enter")
+            if self.enter_fails:
+                raise subprocess.CalledProcessError(1, argv)
+            self.enters += 1
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        self.calls.append("type")
+        self.typed.append(argv[-1])
+        if self.lands_after and len(self.typed) >= self.lands_after:
+            self.pane += "\n" + argv[-1]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def _nap(_seconds):
+    """wake_manager's sleep seam, so a test never actually waits."""
+
+
+def test_wake_manager_waits_for_the_prompt_before_typing():
+    """Typing at a TUI that has not reached its prompt types nowhere, and the message is gone with
+    no error anywhere — which is how a dispatched worker ended up idle at an empty prompt."""
+    import manager_daemon as md
+
+    tmux = _FakeTmux(ready_after=2)
+    md.wake_manager("Tick. sweep the workers", target="cc-manager", run=tmux.run, sleep=_nap)
+    assert tmux.captures >= 3, "must keep looking until a prompt shows, not sleep a fixed time"
+    assert tmux.calls.index("type") > 2, "nothing may be typed before the prompt appears"
+    assert tmux.enters == 1
+
+
+def test_wake_manager_confirms_the_text_landed_before_pressing_enter():
+    import manager_daemon as md
+
+    tmux = _FakeTmux()
+    md.wake_manager("Tick. sweep the workers", target="cc-manager", run=tmux.run, sleep=_nap)
+    first_enter = tmux.calls.index("enter")
+    assert tmux.calls[first_enter - 1] == "capture", "the pane must be re-read between typing and Enter"
+    assert tmux.calls.index("type") < first_enter
+
+
+def test_wake_manager_raises_rather_than_pressing_enter_on_an_empty_box():
+    """send-keys can report success while nothing reaches the input box. Pressing Enter anyway
+    submits nothing and returns as if the manager had been told."""
+    import manager_daemon as md
+
+    tmux = _FakeTmux(lands_after=0)
+    text = "Escalation answered for worker session sess-9: retry once"
+    try:
+        md.wake_manager(text, target="cc-manager", run=tmux.run, sleep=_nap)
+    except md.ManagerUnreachable as e:
+        assert tmux.enters == 0, "nothing may be submitted when the text never landed"
+        assert len(tmux.typed) == md.WAKE_ATTEMPTS, "a few retries, then give up — not forever"
+        assert text in str(e), "the failure must carry the text it could not deliver"
+        return
+    raise AssertionError("an undelivered wake must raise, not return as if it had been said")
+
+
+def test_wake_manager_is_not_fooled_by_the_same_message_already_in_the_scrollback():
+    """The tick sends the SAME sentence every interval, so the previous one is still on screen
+    above the input box. `needle in pane` would confirm a send that never happened."""
+    import manager_daemon as md
+
+    text = "Tick. Walk the open assignments: chase anything past its ETA"
+    tmux = _FakeTmux(lands_after=0, pane=text)
+    try:
+        md.wake_manager(text, target="cc-manager", run=tmux.run, sleep=_nap)
+    except md.ManagerUnreachable:
+        assert tmux.enters == 0
+        return
+    raise AssertionError("a message already in the scrollback must not count as delivered")
+
+
+def test_wake_manager_retries_a_send_that_did_not_land():
+    import manager_daemon as md
+
+    tmux = _FakeTmux(lands_after=2)
+    md.wake_manager("Tick. sweep the workers", target="cc-manager", run=tmux.run, sleep=_nap)
+    assert len(tmux.typed) == 2
+    assert tmux.enters == 1
+
+
+def test_wake_manager_gives_up_when_the_manager_never_reaches_a_prompt():
+    import manager_daemon as md
+
+    tmux = _FakeTmux(ready_after=10**9)
+    try:
+        md.wake_manager("Tick.", target="cc-manager", run=tmux.run, sleep=_nap, ready_timeout=0)
+    except md.ManagerUnreachable as e:
+        assert tmux.typed == [], "never type at a pane that is not at a prompt"
+        assert "no prompt" in str(e)
+        return
+    raise AssertionError("a manager that never reaches a prompt must fail loudly")
+
+
+def test_wake_manager_gives_up_on_a_missing_session_instead_of_hanging():
+    """capture-pane on a dead `cc-manager` exits non-zero — the same "not ready" answer, so the
+    daemon reports it instead of typing into nothing."""
+    import manager_daemon as md
+    from types import SimpleNamespace
+
+    def gone(argv, **kw):
+        assert argv[1] in ("has-session", "capture-pane"), \
+            "nothing may be sent to a session that does not exist"
+        return SimpleNamespace(returncode=1, stdout="", stderr="can't find pane: cc-manager")
+
+    try:
+        md.wake_manager("Tick.", target="cc-manager", run=gone, sleep=_nap, ready_timeout=0)
+    except md.ManagerUnreachable:
+        return
+    raise AssertionError("a missing manager session must raise")
+
+
+def test_wake_manager_flattens_a_multiline_message():
+    """A newline in send-keys IS Enter: it would submit half the message and leave the rest."""
+    import manager_daemon as md
+
+    tmux = _FakeTmux()
+    md.wake_manager("first line\nsecond line\n\n  third", target="cc-manager", run=tmux.run, sleep=_nap)
+    assert tmux.typed == ["first line second line third"]
+
+
+def test_wake_manager_reports_an_unsent_message_when_enter_fails():
+    import manager_daemon as md
+
+    tmux = _FakeTmux(enter_fails=True)
+    try:
+        md.wake_manager("Tick. sweep the workers", target="cc-manager", run=tmux.run, sleep=_nap)
+    except md.ManagerUnreachable as e:
+        assert "unsent" in str(e) and "Tick. sweep the workers" in str(e)
+        assert len(tmux.typed) == 1, "a failed Enter must not retype the text into a box holding it"
+        return
+    raise AssertionError("text left sitting in the input box is not a delivered wake")
+
+
+def test_wake_manager_refuses_an_empty_message():
+    import manager_daemon as md
+
+    tmux = _FakeTmux()
+    try:
+        md.wake_manager("   \n ", target="cc-manager", run=tmux.run, sleep=_nap)
+    except ValueError:
+        assert tmux.typed == []
+        return
+    raise AssertionError("an empty wake is a bug in the caller, not a message")
+
+
+def test_relay_answer_hands_the_answer_to_the_manager_not_the_worker():
+    """The daemon cannot reach a worker at all: SendMessage is a Claude tool and this is plain
+    Python. The answer stops at the manager, who owns the last hop."""
+    import manager_daemon as md
+
+    sent = []
+    original = md.wake_manager
+    md.wake_manager = lambda text: sent.append(text)
+    try:
+        md.relay_answer("sess-9", "retry once")
+    finally:
+        md.wake_manager = original
+    assert len(sent) == 1
+    assert "sess-9" in sent[0] and "retry once" in sent[0]
+    assert "SendMessage" in sent[0], "the manager must be told how to carry it the last hop"
+
+
+# ---------------------------------------------------------------------------
+# Cross-run tick state. Under the systemd timer every fire is a fresh process.
+# ---------------------------------------------------------------------------
+
+
+def test_tick_state_survives_a_fresh_process(tmp_path):
+    """The whole point: a one-pass daemon that forgot `last_tick` would reset the clock on every
+    fire, should_tick() would never see the interval elapse, and the manager sweep would silently
+    never happen — a scheduled job doing nothing forever and saying so nowhere."""
+    path = str(tmp_path / "tick.json")
+    manager_daemon.write_tick_state(1000.0, 3, path)
+    assert manager_daemon.read_tick_state(path) == (1000.0, 3)
+
+
+def test_missing_tick_state_ticks_immediately(tmp_path):
+    """A first run must not wait out a full interval on a queue that may already be blocked."""
+    last_tick, failures = manager_daemon.read_tick_state(str(tmp_path / "khong-co.json"))
+    assert last_tick == 0.0 and failures == 0
+    # A real clock is epoch seconds, so now - 0.0 is decades past any interval.
+    assert manager_daemon.should_tick(last_tick, now=time.time(), open_count=1, running_count=0)
+
+
+def test_corrupt_tick_state_degrades_instead_of_raising(tmp_path):
+    """Same contract as _read_seen(): unreadable state starts fresh, never a traceback that kills
+    the pass before it does any work."""
+    p = tmp_path / "tick.json"
+    p.write_text("{ this is not json", encoding="utf-8")
+    assert manager_daemon.read_tick_state(str(p)) == (0.0, 0)
+
+
+def test_main_does_one_pass_by_default(monkeypatch, tmp_path):
+    """The timer is the cadence. A main() that never returns leaves every oneshot fire to time out
+    and report failure."""
+    calls = []
+    monkeypatch.setattr(manager_daemon, "process_open", lambda *a, **k: iter([]))
+    monkeypatch.setattr(manager_daemon, "wake_pass", lambda lt, *a, **k: calls.append(lt) or 5.0)
+    monkeypatch.setattr(manager_daemon, "TICK_STATE_PATH", str(tmp_path / "tick.json"))
+    monkeypatch.setattr(manager_daemon.manager_session, "resolve_repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(manager_daemon.time, "sleep", lambda s: (_ for _ in ()).throw(
+        AssertionError("main() slept — it looped instead of returning")))
+    monkeypatch.setattr(sys, "argv", ["manager_daemon.py", str(tmp_path / "queue.jsonl")])
+
+    manager_daemon.main()
+    assert len(calls) == 1, "main() did not run exactly one pass"
+    assert manager_daemon.read_tick_state(str(tmp_path / "tick.json"))[0] == 5.0
+
+
+def test_a_bare_loop_flag_is_not_read_as_a_queue_path(monkeypatch, tmp_path):
+    """`--loop` as the only argument used to become the queue path — pointing the daemon at a file
+    that does not exist and making every pass a silent no-op."""
+    seen = {}
+    monkeypatch.setattr(manager_daemon, "process_open",
+                        lambda p, *a, **k: seen.setdefault("path", p) and iter([]) or iter([]))
+    monkeypatch.setattr(manager_daemon, "wake_pass", lambda lt, *a, **k: lt)
+    monkeypatch.setattr(manager_daemon, "TICK_STATE_PATH", str(tmp_path / "tick.json"))
+    monkeypatch.setattr(manager_daemon.manager_session, "resolve_repo_root", lambda: str(tmp_path))
+    monkeypatch.setattr(manager_daemon.time, "sleep", lambda s: (_ for _ in ()).throw(StopIteration))
+    monkeypatch.setattr(sys, "argv", ["manager_daemon.py", "--loop"])
+    try:
+        manager_daemon.main()
+    except StopIteration:
+        pass  # --loop reached the sleep, which is what --loop is for
+    assert seen["path"] == manager_daemon.QUEUE_PATH
+
+
+def test_a_manager_that_was_never_started_fails_fast(monkeypatch):
+    """"Not there" and "not ready yet" are different failures. Waiting the full readiness budget
+    for a session nobody created turned every scheduled daemon fire into a minutes-long stall."""
+    slept = []
+
+    def run(argv, **kw):
+        if argv[:2] == ["tmux", "has-session"]:
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+        raise AssertionError(f"nothing else should be called, got {argv}")
+
+    try:
+        manager_daemon.wake_manager("xin chào", target="cc-khong-co", run=run,
+                                    sleep=lambda s: slept.append(s), ready_timeout=90)
+    except manager_daemon.ManagerUnreachable as exc:
+        assert "xin chào" in str(exc), "the undelivered text must travel with the failure"
+    else:
+        raise AssertionError("a missing session must not read as a delivered wake")
+    assert slept == [], "it waited on a session that does not exist"
+
+
+def test_a_missing_manager_says_how_to_start_it():
+    """One message for "never started" and "busy" sends an operator to the wrong place half the
+    time — the first needs manager-start, the second needs someone to go look."""
+    from types import SimpleNamespace
+
+    def gone(argv, **kw):
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    try:
+        manager_daemon.wake_manager("Tick.", target="cc-manager", run=gone, sleep=_nap, ready_timeout=0)
+    except manager_daemon.ManagerUnreachable as exc:
+        assert "manager-start" in str(exc), f"no way out offered: {exc}"
+        assert "showed no prompt" not in str(exc), "a session that does not exist did not time out"
+    else:
+        raise AssertionError("a missing manager must raise")

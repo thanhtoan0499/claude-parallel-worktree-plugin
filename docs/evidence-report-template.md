@@ -121,3 +121,49 @@ Bằng chứng phải là output thật của lần chạy thật. Chép tay, d�
 chụp từ lần khác đều không tính. Chỗ nào không chứng minh được thì ghi
 `"chưa chứng minh"` và nói rõ vì sao — đó là câu trả lời hợp lệ, còn tô xanh một
 ô không có gì đứng sau thì không.
+
+## Kẹt thì nhắn, đừng đoán
+
+Ngày 10/09 một worker hỏi một câu ("có rebuild container không?") rồi ngồi im
+một tiếng. Không phải nó lười — lúc đó không có đường nào để hỏi. Giờ có:
+`SendMessage` thẳng cho manager.
+
+Nhắn ngay, đừng tự quyết, khi:
+
+- Việc sắp làm **không lùi lại được**: xoá dữ liệu, push lên `main`, đụng vào môi trường thật.
+- **Spec tự mâu thuẫn** — hai chỗ đòi hai đằng, chọn bên nào cũng là chọn hộ người viết spec.
+- Quyết định là **của PO/BA**, không phải của người viết code: đổi phạm vi, đổi hành vi người
+  dùng nhìn thấy, bỏ bớt một yêu cầu.
+- **Thiếu quyền hoặc thiếu credential**: không có token, không vào được máy, một hộp thoại quyền
+  không ai bấm hộ được.
+- **Cùng một cách đã hỏng nhiều lần** — tới lần thứ ba vẫn cùng một lỗi thì cái sai nằm ở giả
+  định, không nằm ở lần thử tiếp theo.
+
+### Nhắn cho ai
+
+`SendMessage`, địa chỉ là **tên hiển thị chính xác của manager**. cmew đổi tên phiên khi hiển
+thị: manager hiện ra dạng `Manager 🔹`, và gửi tới `Manager` bị **từ chối** — không phải "gửi rồi
+mà chưa ai đọc", mà là không gửi được.
+
+Đừng đoán tên đó. Chạy `ListAgents`, đọc tên đúng từng ký tự (kể cả emoji), copy nguyên si.
+
+### Một tin nhắn dùng được có bốn phần
+
+1. **Kẹt ở đâu** — một câu: vé nào, đang đứng ở chỗ nào.
+2. **Đã thử gì** — từng cách đã chạy và kết quả của nó, để manager không bảo làm lại đúng cái
+   vừa hỏng.
+3. **Có những phương án nào** — nhìn ra được thì nêu A/B kèm cái giá của mỗi bên; không nhìn ra
+   thì nói thẳng là chưa thấy phương án nào.
+4. **Đang có bằng chứng gì** — output, log, ảnh. Đường dẫn tệp là đủ.
+
+### Hai điều không được làm
+
+- **Không ngồi im chờ.** Không nhắn thì không ai biết bạn đang kẹt: nhìn từ bên ngoài, đang kẹt
+  và đang làm việc giống hệt nhau.
+- **Không bịa kết quả để đi tiếp.** Cùng một luật với "Không đính bằng chứng giả" ở trên: chỗ nào
+  chưa chứng minh được thì ghi `"chưa chứng minh"` và nói rõ vì sao. **Một cái kẹt mô tả chính xác
+  đáng giá hơn một kết quả dựng ra cho có** — nó nói cho người đọc biết phải quyết cái gì, còn ô
+  tô xanh không có gì đứng sau thì chỉ giấu mất chỗ đó.
+
+Nhắn xong thì làm tiếp phần không phụ thuộc câu trả lời. Chờ là chờ đúng cái đang vướng, không
+phải dừng cả vé.

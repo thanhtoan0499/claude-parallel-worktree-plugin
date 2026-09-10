@@ -1,0 +1,27 @@
+[Unit]
+Description=One pass of the manager escalation daemon (see bin/manager_daemon.py)
+
+[Service]
+Type=oneshot
+# Same trap as manager-keepalive.service: a --user unit's inherited PATH has no ~/.local/bin, and
+# manager_session.claude_bin() resolves the CLI through shutil.which("claude") before falling back
+# to an absolute guess. Setting PATH here is what makes that lookup find the same `claude` a login
+# shell would, instead of quietly landing on the fallback (or on a different install).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# The same operator config board-mirror and stuck-session-watch already use, for the one variable
+# this needs: PWT_REPO_ROOT, which manager_session.resolve_repo_root() reads to decide where the
+# manager's `claude` subprocess runs. Unset, it falls back to the CWD — which for a systemd unit
+# is `/`, not a checkout.
+EnvironmentFile=%h/.config/board-mirror/env
+# A symlink to the checked-out bin/manager_daemon.py, not a copy — see README.md. Python resolves
+# the symlink before setting sys.path[0], so its imports still come out of the repo `bin/` next to
+# the target, exactly as stuck_sessions.py's do.
+ExecStart=/usr/bin/env python3 %h/.config/board-mirror/manager_daemon.py
+# The timer is the tick: this entry point must do ONE pass and exit. A build that reinstates an
+# internal `while True` loop does not quietly become a long-running service here — it burns the
+# whole budget, gets killed, and shows up as status=1/FAILURE, which is the loud failure that a
+# frozen unit blocking every later fire would not be.
+#
+# 240s covers a pass that has to open a real `claude` session to decide an escalation, and stays
+# under the 5-minute cadence.
+TimeoutStartSec=240

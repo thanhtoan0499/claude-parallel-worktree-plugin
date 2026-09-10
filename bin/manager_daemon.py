@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Watch the escalation queue: let the manager settle what it can, hand the rest to the human.
 
+The daemon no longer carries anything to a worker. Everything it has to say goes to the resident
+manager session in tmux `cc-manager`, which relays it with SendMessage — the manager is a Claude
+session and has that tool, this daemon is plain Python and never will. Two jobs are left: the
+periodic tick that asks the manager to sweep stalled workers, and carrying the CTO's board answer
+into the manager. Both go through wake_manager().
+
 Run: manager_daemon.py [queue-path]
 """
 
@@ -14,11 +20,25 @@ import traceback
 import manager_session
 from assignments import open_assignments
 from escalations import QUEUE_PATH, append, classify, current_state, record_answer
-from manager import build_prompt, decide, deliver_answer
+from manager import build_prompt, decide
 
 DELIVERY_ATTEMPTS = 3
 
+# The manager's tmux session. It is the ONE session nothing can reach with SendMessage — that is
+# a Claude tool and this daemon has no Claude in it — so send-keys survives here and nowhere else.
+MANAGER_PANE = os.environ.get("PWT_MANAGER_PANE", "cc-manager")
+MANAGER_PROMPT = "❯"  # what an idle Claude Code TUI shows; typing before it appears types nowhere
+MANAGER_READY_TIMEOUT = 90  # same budget parallel-task.sh gives a booting worker TUI
+WAKE_ATTEMPTS = 3
+
 SEEN_PATH = os.path.expanduser("~/.claude/hermes/manager-seen-sessions.json")
+# `last_tick` and the failure streak are the daemon's only cross-run memory, and under the systemd
+# timer every fire is a FRESH PROCESS — so holding them in module state means each run starts with
+# `last_tick = now`, `should_tick()` never sees the interval elapse, and the manager sweep silently
+# never happens. Not a crash: a scheduled job that does nothing forever and says so nowhere. Kept
+# beside SEEN_PATH because it is the same kind of state and shares its failure mode (a corrupt or
+# missing file degrades to "start fresh", never to a traceback).
+TICK_STATE_PATH = os.path.expanduser("~/.claude/hermes/manager-tick-state.json")
 TICK_SECONDS = int(os.environ.get("PWT_MANAGER_TICK_SECONDS", "1800"))
 TICK_RETRY_SECONDS = 60
 # A failing tick is retried sooner than a full interval, but a tick that keeps failing is not a
@@ -55,6 +75,8 @@ def _note_tick_failure(now: float, detail: str) -> float:
         file=sys.stderr,
     )
     return now - TICK_SECONDS + delay
+
+
 DONE_STATUSES = ("idle", "done", "stopped")
 
 SUBPROC_ERRORS = (OSError, subprocess.SubprocessError, json.JSONDecodeError)
@@ -152,6 +174,166 @@ def _write_seen(seen: dict) -> None:
         json.dump(seen, fh)
 
 
+def read_tick_state(path: str | None = None) -> tuple[float, int]:
+    """`(last_tick, failure_streak)` carried over from the previous run.
+
+    `(0.0, 0)` when there is nothing readable — a zero `last_tick` means "the interval has long
+    since elapsed", so a first run (or a wiped file) ticks immediately rather than waiting out a
+    full interval on a queue that may already be blocked.
+    """
+    # Resolved at CALL time, not bound as a default argument: a default is evaluated once when
+    # the module is imported, so reconfiguring TICK_STATE_PATH (a test, a second deployment)
+    # would silently keep writing to the original file.
+    path = path or TICK_STATE_PATH
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return float(data.get("last_tick") or 0.0), int(data.get("failures") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0.0, 0
+
+
+def write_tick_state(last_tick: float, failures: int, path: str | None = None) -> None:
+    path = path or TICK_STATE_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"last_tick": last_tick, "failures": failures}, fh)
+
+
+class ManagerUnreachable(RuntimeError):
+    """A wake never reached the manager's input box. Carries the text, so it is not lost silently."""
+
+
+# Enough of the message to recognise it in the pane, short enough that a wrapped line cannot break
+# the match: the input box sits inside a border and a prompt, so ~24 chars fit on any sane width.
+_NEEDLE_CHARS = 24
+
+
+def _capture_pane(target: str, run) -> str:
+    """What the pane currently shows, or "" when it cannot be read — including "no such session"."""
+    try:
+        proc = run(["tmux", "capture-pane", "-p", "-t", target], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or "") if proc.returncode == 0 else ""
+
+
+def _session_exists(target: str, run) -> bool:
+    """Whether the tmux session is there at all.
+
+    "Not there" and "not ready yet" are different failures and must not cost the same. A manager
+    mid-turn is worth waiting out; a manager that was never started is not, and waiting the full
+    readiness budget for one turns every scheduled daemon fire into a minutes-long stall on a
+    machine where nothing can possibly answer.
+    """
+    try:
+        return run(["tmux", "has-session", "-t", target],
+                   capture_output=True, text=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _wait_for_prompt(target: str, run, sleep, timeout: float) -> bool:
+    """Block until the pane shows a prompt, or the budget runs out.
+
+    Waiting for the prompt, never sleeping a fixed time at it: parallel-task.sh's first version
+    slept and typed into a TUI that had not finished booting, and the worker then sat at an empty
+    prompt looking exactly like one that had been told nothing (2026-09-10, again this morning).
+    A manager that is mid-turn shows no prompt either, and typing at it is the same lost message.
+    """
+    if not _session_exists(target, run):
+        return False
+    deadline = time.monotonic() + timeout
+    while True:
+        if MANAGER_PROMPT in _capture_pane(target, run):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        sleep(1)
+
+
+def wake_manager(
+    text: str,
+    target: str | None = None,
+    run=subprocess.run,
+    sleep=time.sleep,
+    ready_timeout: float = MANAGER_READY_TIMEOUT,
+    attempts: int = WAKE_ATTEMPTS,
+) -> None:
+    """Say one thing to the resident manager, and prove it landed. Raises if it did not.
+
+    The contract, in order: wait for a prompt; type the text; CONFIRM it reached the input box by
+    capturing the pane again; only then press Enter. Fire-and-hope is exactly what left a
+    dispatched worker idle at an empty prompt this morning, and a daemon has nobody watching it to
+    notice — so an undelivered wake raises ManagerUnreachable carrying the text rather than
+    returning as if it had been said.
+
+    Confirmation counts occurrences instead of asking "is it there": the tick sends the SAME
+    sentence every interval, so the previous tick is still in the scrollback above the input box
+    and a plain `needle in pane` check would confirm a send that never happened, then press Enter
+    on an empty box. The count must go UP.
+
+    The text is flattened to one line first — a newline in send-keys IS Enter, which would submit
+    half a message and leave the rest as a second one.
+    """
+    target = target or MANAGER_PANE
+    line = " ".join(text.split())
+    if not line:
+        raise ValueError("refusing to wake the manager with an empty message")
+
+    if not _wait_for_prompt(target, run, sleep, ready_timeout):
+        # Two different failures, said differently. "Never started" tells an operator to run
+        # `parallel-task.sh manager-start`; "busy for 90s" tells them to go look at what it is
+        # stuck on. One message for both sends them to the wrong place half the time.
+        why = (f"tmux session {target} is not running — start it with: parallel-task.sh manager-start"
+               if not _session_exists(target, run)
+               else f"tmux session {target} showed no prompt within {ready_timeout}s")
+        raise ManagerUnreachable(f"{why}; not delivered: {line}")
+
+    needle = line[:_NEEDLE_CHARS]
+    for _ in range(attempts):
+        before = _capture_pane(target, run).count(needle)
+        try:
+            # -l -- : literal, so a message that starts with a dash or contains a word tmux reads
+            # as a key name ("Enter", "Space") is typed as text instead of pressed as a key.
+            run(
+                ["tmux", "send-keys", "-t", target, "-l", "--", line],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            sleep(2)
+            continue
+        sleep(1)
+        if _capture_pane(target, run).count(needle) <= before:
+            sleep(2)
+            continue
+        try:
+            run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=10, check=True)
+        except (OSError, subprocess.SubprocessError) as e:
+            # Retrying here would type the text a SECOND time into a box that already holds it.
+            raise ManagerUnreachable(f"typed into {target} but could not press Enter ({e}); unsent: {line}") from e
+        return
+
+    raise ManagerUnreachable(f"text never reached the input box of {target} in {attempts} tries; not delivered: {line}")
+
+
+def relay_answer(session_id: str, message: str) -> None:
+    """Hand one decided answer to the manager, whose job it is to carry it to the worker.
+
+    This is the CTO's board answer arriving, and it stops at the manager. The daemon cannot talk
+    to a worker at all: SendMessage is a Claude tool, and send-keys into a worker's pane would be
+    a second person typing into a session the manager is already holding a conversation with.
+    """
+    wake_manager(
+        f"Escalation answered for worker session {session_id}: {message} "
+        "— relay it to that worker with SendMessage (its agent name is in the registry), "
+        "then check it actually resumed."
+    )
+
+
 def should_tick(last_tick: float, now: float, open_count: int, running_count: int) -> bool:
     """Tick only when the interval has passed AND there is something to chase.
 
@@ -164,7 +346,7 @@ def should_tick(last_tick: float, now: float, open_count: int, running_count: in
 
 def wake_pass(
     last_tick: float,
-    ask=manager_session.ask_result,
+    wake=wake_manager,
     agents_fn=list_agents,
     known_fn=registry_session_ids,
     open_fn=open_assignments,
@@ -178,10 +360,10 @@ def wake_pass(
     in try/except; the worst case of a raise is a duplicate wake on the next pass, not a crash.
 
     Each wake is marked seen only AFTER it has been delivered — the inverse ordering silently
-    drops a notification the moment the manager is busy, and it is never re-detected. `ask` must be
-    ask_result's (ok, text) contract, not ask()'s bare string: ask() returns a failure NOTE on a
-    subprocess error instead of raising, so a caller that only guards with try/except reads that
-    failure as a delivered wake and never retries it.
+    drops a notification the moment the manager is busy, and it is never re-detected. `wake` is
+    wake_manager's contract: it returns only when the text is in the manager's input box and
+    raises otherwise, so "it failed" and "it was said" can never be the same value here. The old
+    seam (ask_result) could return a failure NOTE as ordinary text, which read as a delivered wake.
     """
     read_seen = read_seen or _read_seen
     write_seen = write_seen or _write_seen
@@ -199,16 +381,12 @@ def wake_pass(
     for agent in fired:
         name = agent.get("name") or agent.get("sessionId")
         try:
-            ok, text = ask(
+            wake(
                 f"Worker '{name}' (session {agent.get('sessionId')}) finished. "
-                "Check its work, update the ledger, and dispatch what comes next.",
-                "daemon:worker-finished",
+                "Check its work, update the ledger, and dispatch what comes next."
             )
         except Exception as e:
             print(f"  wake for {name} failed, will retry: {e}", file=sys.stderr)
-            continue
-        if not ok:
-            print(f"  wake for {name} failed, will retry: {text}", file=sys.stderr)
             continue
         seen[agent["sessionId"]] = agent.get("state") or agent.get("status")
         write_seen(seen)
@@ -225,15 +403,12 @@ def wake_pass(
     if not should_tick(last_tick, now, len(open_fn()), running):
         return last_tick
     try:
-        ok, text = ask(
+        wake(
             "Tick. Walk the open assignments: chase anything past its ETA or still unplanned, "
-            "update each note, and write a report if you have not written one in 24 hours.",
-            "daemon:tick",
+            "update each note, and write a report if you have not written one in 24 hours."
         )
     except Exception as e:
         return _note_tick_failure(now, str(e))
-    if not ok:
-        return _note_tick_failure(now, text)
     reset_tick_failures()
     return now
 
@@ -251,11 +426,15 @@ def ask_via_session(record: dict, ask=manager_session.ask_result) -> str:
 
 
 def _try_deliver(path: str, rec: dict, message: str, deliver) -> str:
-    """Carry one answer back to its worker, marking it delivered only once it actually landed.
+    """Hand one answer on (relay_answer → the manager), marking it delivered only once it landed.
 
-    Marking before delivering is how an answer gets silently lost: the queue reads as delivered
-    while the worker is still blocked. After DELIVERY_ATTEMPTS failures the record goes back to a
-    human — an undeliverable answer must surface, never vanish.
+    `deliver` used to reach into the worker's own transcript with `claude --resume`; it
+    is relay_answer now and stops at the manager, who owns the last hop. The bookkeeping is
+    unchanged and still load-bearing: marking before delivering is how an answer gets silently
+    lost — the queue reads as delivered while the worker is still blocked — and after
+    DELIVERY_ATTEMPTS failures the record goes back to a human, because an undeliverable answer
+    must surface, never vanish. escalations.is_undeliverable() reads exactly the shape written
+    here, and the dashboard's "không gửi được" panel reads that.
     """
     try:
         deliver(rec["session_id"], message)
@@ -316,15 +495,25 @@ def main() -> None:
     # no repo above it, and stripping `.claude/worktrees/...` off of it would silently produce the
     # wrong directory instead of a clear one.
     manager_session.REPO_ROOT = manager_session.resolve_repo_root()
-    path = sys.argv[1] if len(sys.argv) > 1 else QUEUE_PATH
+    # An argv that is only "--loop" must not be read as a queue path — that would point the
+    # daemon at a file that does not exist and make every pass a no-op.
+    positional = [a for a in sys.argv[1:] if not a.startswith("-")]
+    path = positional[0] if positional else QUEUE_PATH
     # flush=True: stdout is block-buffered once it is not a tty (the normal case for a
     # backgrounded daemon), so without it these lines can sit in the buffer indefinitely and an
     # operator tailing the log sees nothing even though the daemon is alive and working.
     print(f"manager daemon watching {path}", flush=True)
-    last_tick = time.time()
+
+    # ONE pass by default, because the systemd timer IS the cadence (bin/systemd/manager-daemon.timer).
+    # A process that never returns would leave every oneshot fire to time out and report failure.
+    # --loop keeps the old always-on behaviour for running it by hand.
+    loop = "--loop" in sys.argv[1:]
+    global _consecutive_tick_failures
+    last_tick, _consecutive_tick_failures = read_tick_state()
+
     while True:
         try:
-            for outcome in process_open(path, ask_via_session, deliver_answer):
+            for outcome in process_open(path, ask_via_session, relay_answer):
                 print(f"  {outcome['outcome']}: {outcome['reason']}", flush=True)
         except Exception as e:  # a bad pass must not kill the daemon
             print(f"  pass failed: {e}", file=sys.stderr)
@@ -335,6 +524,11 @@ def main() -> None:
         except Exception as e:  # a bad wake pass must not kill the daemon
             print(f"  wake pass failed: {e}", file=sys.stderr)
 
+        # Written on EVERY pass, loop or not: the streak and the tick clock are what the next
+        # process (or the next iteration) reads to decide whether to sweep at all.
+        write_tick_state(last_tick, _consecutive_tick_failures)
+        if not loop:
+            return
         time.sleep(5)
 
 

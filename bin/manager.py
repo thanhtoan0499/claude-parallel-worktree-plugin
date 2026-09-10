@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""The manager tier: turn one escalation into a decision, and deliver it back to the worker.
+"""The manager tier: turn one escalation into a decision.
 
-Everything here except deliver_answer() is pure, so the judgement logic is testable without
-spawning a model.
+Judgement only — nothing here delivers anything. Delivery used to live here as a pair of
+functions that ran `claude --resume <id> -p -- <msg>`. That spawns a NEW
+headless process which resumes the transcript, runs one turn and exits: it never reaches the live
+tmux session the worker is sitting in, so the worker stays at its prompt unaware while two
+processes race on one transcript. The whole path was written for `claude --bg` workers and died
+the day workers became interactive tmux sessions (2026-09-10: t5061 asked the manager one question
+and sat idle for an hour). The manager is itself a Claude session holding SendMessage now, so it
+answers its workers directly.
+
+Everything here is pure, so the judgement logic is testable without spawning a model.
 """
 
 import json
-import subprocess
 
-import manager_session
 from escalations import classify, normalize_options
 
 _FENCE = "<<<WORKER_DATA>>>"
@@ -131,28 +137,6 @@ def validate_decision(decision, record: dict) -> str | None:
     if options and decision["answer"] not in options:
         return f"answer {decision['answer']!r} is not one of the offered options"
     return None
-
-
-def resume_argv(session_id: str, message: str) -> list[str]:
-    """Argv that delivers a message into an existing session.
-
-    -p is a boolean flag and the message is positional; without the -- separator a message
-    starting with a dash (e.g. "--help") is parsed as a flag, `claude` exits 0 printing usage,
-    and the message never reaches the session — a silent non-delivery, not a visible error.
-    """
-    return [manager_session.claude_bin(), "--resume", session_id, "-p", "--", message]
-
-
-def deliver_answer(session_id: str, message: str, timeout: int = 180) -> str:
-    """Thin shell: push an answer into a blocked worker session."""
-    result = subprocess.run(
-        resume_argv(session_id, message),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=timeout,
-    )
-    return result.stdout
 
 
 def _route(record: dict, ask_model) -> dict:
