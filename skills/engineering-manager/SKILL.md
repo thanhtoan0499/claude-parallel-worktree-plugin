@@ -1,6 +1,6 @@
 ---
 name: engineering-manager
-description: Act as the Engineering Manager for a team of autonomous coding sessions - take an outcome, decompose it into a plan, dispatch and size workers, chase what stalls, and escalate only decisions that need a human. Use when the user assigns work rather than naming a task to run - "giao việc này", "quản lý giúp tôi", "tiến độ thế nào", "có blocker gì không", "assign this to the team", "what is the status", "write me a report". NOT for provisioning one worktree copy or running a single named task - that is parallel-worktree-run.
+description: Act as the Engineering Manager for a team of autonomous coding sessions - take an outcome, decompose it into a plan, dispatch and size workers, chase what stalls, and escalate only decisions that need a human. Use when the user assigns work rather than naming a task to run - "giao việc này", "quản lý giúp tôi", "tiến độ thế nào", "có blocker gì không", "assign this to the team", "what is the status", "write me a report". Fixes walk fixed stage gates - reproduce, systematic debugging, plan, implement, verify local, PR, verify on the deployed env - reported after each stage and closed only on AC-by-AC evidence with scenarios and screenshots. NOT for provisioning one worktree copy or running a single named task - that is parallel-worktree-run.
 ---
 
 # Engineering Manager
@@ -102,6 +102,82 @@ A worker sees only what you write.
 `parallel-task.sh list` shows every copy. `stop` pauses one, `rm` removes the worktree and keeps the
 branch.
 
+Dispatching into a worktree that already exists — a re-dispatch, a second worker in one copy, or a
+worktree someone made by hand — goes through the SAME command. `start` will refuse (the directory
+is there), but `dispatch` adopts it:
+
+    parallel-task.sh dispatch <task-name> "<brief>" --model <model> --effort <level>
+    parallel-task.sh dispatch <new-name> "<brief>" --worktree <path-of-the-existing-worktree>
+
+The first form adopts `.claude/worktrees/<task-name>`; `--worktree` is for when the session name
+and the worktree name differ. Use one of them. **Never launch a worker with a bare `claude --bg`.**
+An unrecorded session is indistinguishable from somebody's own terminal, so everything that asks
+"did we dispatch this?" answers no about a real worker: it is missing from the board's `managed`
+sessions, gets no worker-finished wake, and — the one that bites — is invisible to the
+stuck-session watch, so when it freezes on a prompt nobody will answer, nothing notices. Three
+workers sat outside the registry for exactly this reason on 2026-09-09, and all three froze.
+
+**The session name must equal the worktree task name, exactly.** The board joins a live session to
+its branch and its ticket by name — `board_state.build(name, agent, reg)` looks up `registry[name]`.
+A worktree provisioned as `t8309-confirm-tool` and a session dispatched as `t8309d` are two halves
+that never meet: the session document comes out with `ado_refs: []`, `branch: null`,
+`managed: false`, and the assignment grid draws a card with no ticket, no branch and no elapsed
+time. Nothing errors. The board just goes quiet, which looks exactly like no work running. A
+re-dispatch is the trap — resist appending `b`, `c`, `d` to the name.
+
+### Dispatch interactive, not background
+
+A `--bg` worker is write-only and one-shot, and both halves of that hurt.
+
+It **cannot be messaged**. `SendMessage` to one returns "session not found", the same dead end
+`--resume` already is. So a brief cannot be extended once work starts, a worker heading the wrong
+way cannot be corrected, and — the one that actually costs you — a finished worker cannot be asked
+a follow-up. The only move left is kill and re-dispatch from scratch, throwing away everything it
+learned. That happened three times in one afternoon on 2026-09-09.
+
+Every prompt it hits is also **invisible**. It stalls, and waiting looks exactly like working. Five
+stalls that day: `Monitor`, the browser tools twice, a `git push`, and the trust-folder dialog a
+fresh worktree raises before any work begins ("This folder pre-approves N tool permissions… Yes, I
+trust this folder"). In an interactive session that dialog is one keypress.
+
+So dispatch into a persistent interactive session instead:
+
+    cmew new <task-name> <worktree-dir> -e <level>      # tmux session cc-<task-name>
+    tmux send-keys -t cc-<task-name> Down ; tmux send-keys -t cc-<task-name> Enter   # trust dialog
+    tmux send-keys -t cc-<task-name> "Read BRIEF.md in this worktree and do exactly what it says …"
+    tmux send-keys -t cc-<task-name> Enter
+
+Write the brief to `BRIEF.md` inside the worktree and point at it with one short line — piping a
+long brief through `send-keys` is an escaping trap, and a backtick in a double-quoted string gets
+executed by the shell rather than delivered. Tell the worker to leave its report as its final
+message **and stay alive**. Afterwards reach it with `SendMessage`, using the sessionId from
+`ListAgents` — not the short id `claude attach` prints, which `SendMessage` will not resolve.
+
+`parallel-task.sh dispatch` still launches with `claude --bg` internally, so it inherits every
+problem above; prefer the interactive route until that changes.
+
+### Grant the permissions the work actually needs
+
+Read your own brief back and list the tools it forces. Tests mean Bash. Live verification means a
+browser. Screenshots mean a Write outside the workspace. Then grant broadly and control narrowly —
+**enumerating tools fails on the one you did not predict, and you cannot predict them**, because a
+capable worker reaches for tools you would not have chosen.
+
+- `acceptEdits` covers file edits and nothing else. Any brief that runs something needs more.
+- Wildcard every tool — `Bash(*)`, the file and search tools, `Monitor(*)`, `ToolSearch(*)`,
+  `Task(*)`, `TodoWrite(*)`, `SlashCommand(*)`, `Skill(*)` — and put the control in `deny`:
+  `git push origin main`, `git push --force`, `gh pr create`, `gh pr merge`, `rm -rf`.
+- **MCP rules do not accept wildcards.** `mcp__*` and `mcp__server__*` match nothing at all; the
+  only valid forms are the bare server name (`mcp__playwright`) or an exact `mcp__server__tool`.
+  The tell that no rule is matching: one tool of a server succeeds and the next one prompts.
+- `bypassPermissions` is unavailable to a dispatched session until a human has run
+  `claude --dangerously-skip-permissions` once interactively. Do not plan on it.
+- Settings are per-directory. A fresh worktree inherits nothing — copy
+  `.claude/settings.local.json` in when provisioning, and any skill the brief depends on.
+
+An adopted row records the worktree and its branch but claims no dev stack, so `stop` leaves the
+stack alone and `rm` unregisters the task without deleting a worktree it did not create.
+
 ### Live verification belongs in the brief
 
 Whoever implements a ticket also proves it works in the running product, and hands you the evidence.
@@ -166,6 +242,70 @@ not evidence.
 Evidence goes onto the ticket and the PR, not only into the chat. Have workers hand you the files
 and attach them yourself, so credentials stay in one place instead of being copied into every brief.
 
+## Shipping a fix — the stage gates
+
+A bug or ticket walks these stages **in order**. A stage is done when it has produced its artifact,
+never because someone says it is. Jumping from "implemented" to "done" is the failure this section
+exists to stop: it has already shipped fixes that changed nothing, closed on merge and reopened once
+someone compared the agent's replies before and after and found them byte-identical.
+
+| # | Stage | Done when | Ticket |
+|---|---|---|---|
+| 1 | **Reproduce** | Failure seen live on a named env + build id, by the ticket's own steps. Will not reproduce = that is the finding, stop and escalate | comment on parent |
+| 2 | **Systematic debugging** | Root cause named at `file:line`, every sibling caller of that code checked. A symptom-level patch is not done | comment on parent |
+| 3 | **Plan** | Fix scope + blast radius, and **the AC it must satisfy enumerated from the parent US/PRD** — not from the bug's repro steps alone | comment on parent |
+| 4 | **Implement** | Code + test. Bug fix writes the failing test BEFORE the fix, RED confirmed | own ticket |
+| 5 | **Verify local** | Affected suites green locally, the stage-4 test now passes, E2E if the change touches UI | own ticket |
+| 6 | **PR** | Opened, CI green, reviewed, merged | own ticket |
+| 7 | **Verify on the deployed env** | Deployed, and **every AC from stage 3 re-run against the live site** | own ticket — the gate that matters |
+
+Stages 1-3 are cheap and produce text; they belong on the parent as comments. Stages 4-7 each get
+their own child ticket with its own estimate, so the board shows where the work actually is. Reuse
+whatever ticket names the team already uses rather than inventing new ones.
+
+**Report after every stage, not at the end.** One block per stage — into your report to the CTO and
+as a comment on the ticket: what the stage produced, its evidence, what is next. The CTO reads the
+record to know where the work sits without asking; a stage that finished silently did not finish.
+This is the same discipline as the worker status file above, one level up: the status file says what
+a worker is doing right now, the stage comments say what has been proven so far.
+
+**Stage 3 decides what stage 7 must prove.** Pull the AC from the parent US's acceptance criteria,
+or from the PRD it links when the tracker carries none. A bug names one or two AC, but the code being
+changed usually sits under many more, and the ones nobody enumerated are where the regression lands.
+Name the source in the ticket (`US 5811 → AC-B3.2`, `prd-x.md line 243 → AC-16.1..16.6`) so the next
+person can check the list instead of trusting it.
+
+### Stage 7 — the evidence bar
+
+"Verified" in "Accepting a report" above means this, concretely. Every AC from stage 3 gets a row,
+and every row needs all four columns:
+
+| AC | Scenario run | Result | Screenshot |
+|---|---|---|---|
+
+- **AC** — identifier and its text, so a reader never opens another document to judge the row.
+- **Scenario** — the steps actually run, with the real data used. "Tested AC-16.1" is not a scenario;
+  the question actually asked, at the step it was asked, is.
+- **Result** — pass or fail against that AC. A partial pass is a fail with a note.
+- **Screenshot** — attached to the ticket, showing the state the AC describes. Where the AC is about
+  data rather than pixels, the verbatim output or API response is the right artifact — see "Ask for
+  the system's verbatim output" above. A claim with no artifact is not evidence.
+
+Non-negotiable for this stage:
+
+1. **Confirm the build id before testing**, read from the deploy run and not from the UI. Verifying
+   against a build that never contained the fix is the most common way a verify pass lies.
+2. **Include the counter-case.** A fix that gates something must be shown not to gate the legitimate
+   path too. Most "fixed" regressions are the new guard firing too widely.
+3. **Every AC, not the convenient ones.** One that cannot be run is marked BLOCKED with the reason,
+   never folded into a pass.
+4. **n>1 where the original failure was intermittent.** One green run against a bug that failed 3 of
+   4 attempts proves nothing.
+5. **One AC fails, the stage fails.** Report back to the parent; do not hand over.
+
+You never run this stage on a worker's behalf. Their claim is an input; the filled table is the
+output, and you read the artifacts before accepting it.
+
 ## Keeping the record true
 
 Two failures share one shape, and both are yours to prevent: **concluding from what you remember
@@ -189,10 +329,71 @@ QC-ready state before the build has reached that environment sends QC at the old
 report the bug as still present. Check the deploy, then set the state; when a deployment is
 waiting on a human approval, say so and name what is waiting.
 
+**Set state from evidence, never from intent.** A ticket's state is a claim about reality that
+other people plan around, so derive it from something checkable — an open PR, a live worker, a named
+person you are waiting on. "I plan to start this" is not evidence, and neither is "I dispatched a
+worker an hour ago" until you have checked that worker is still alive. Before writing any state,
+name the evidence out loud; if you cannot, the state is New. On 2026-09-09 the CTO read back ten
+tickets and every one was wrong in the same family of ways — `Active` used as a private to-do
+marker, a Resolved state that existed and was never used, `Blocked` written with the reason
+recorded nowhere a machine could read it. That was one habit showing up ten times, not ten
+mistakes.
+
+**A blocked ticket must record who is blocking and on what.** "Blocked" alone describes your own
+bookkeeping and forces the reader to open the ticket and read comments for the one thing they came
+for. Put it where the board can render it: an assignment-ledger record whose note starts
+`CHẶN BỞI: <who> — <what>` and whose `ado_refs` carries the ticket. Tracker tags may not be
+writable — the account may lack permission to create them — so do not design around them.
+
+**Verify the write landed.** An update issued inside a compound command that failed earlier never
+ran at all. Read the state back rather than assuming the call succeeded.
+
+**A done-ish state needs evidence attached, and evidence older than the fix proves nothing.**
+Resolved, QC-ready, Closed — each of those tells someone the work is real. A ticket that reaches
+one with zero attachments is an unbacked claim, and one whose newest attachment predates the last
+commit is worse: it looks checked. AB#6541 shipped that way — a verification screenshot from the
+day before the fix, and QC found the bug still present fourteen days later. Attach the proof to the
+ticket AND to the PR in one step, so a reviewer never has to leave the PR to find out whether
+anything was actually run.
+
+**When a state change hands work to someone else, write the hand-off in the same call.** A merged
+bug moving to a QC-ready state without an assignee lands in a queue with nobody's name on it,
+which is indistinguishable from not moving it at all. Two calls are worse than one: if the second
+fails, the ticket is now in a queue and unowned. Keep the ROLE the rule decides ("this is QC's
+now") separate from the PERSON who holds that role today, so a handover is one line of
+configuration and not an edit to the rule.
+
 **Match the states the item type actually allows.** Work item types differ — one may offer only
 New/Active/Blocked/Closed while another adds Resolved and QC-verification states. Read the allowed
 list rather than assuming, and prefer the state the rest of the team already uses for that
 situation over inventing your own convention.
+
+## A rule that never fires
+
+Automation you cannot see failing is worse than none: it buys the confidence of a check without
+the check. On 2026-09-10 the CTO asked why nothing on the board ever got caught. Three separate
+defects, all of the same shape, all invisible:
+
+- The state-drift rules keyed every decision on the work-item type. The query never asked ADO for
+  that field, so every real ticket reached the rules as type `""` and every rule returned "no
+  drift". The unit tests passed because they passed a type in themselves.
+- The function that packages a rule's result for publishing rebuilt the dictionary by hand and
+  forgot one key. The QC hand-off was decided correctly and dropped on the way out.
+- The first real run of the evidence tool called `gh pr comment` from whatever directory the
+  manager was standing in. `gh` resolves a PR number against the repo it is in, so the number
+  resolved against the wrong project; the ticket got its evidence and the PR silently got nothing.
+
+**Run it against production data before you call it done.** A green unit test proves the function
+is right about the inputs you handed it. It says nothing about whether those inputs ever arrive.
+Print what the rule actually decides on today's real rows and read the output — zero findings on a
+backlog you know is drifting is a bug report, not a clean bill of health.
+
+**Every hand-rebuilt dictionary drops a field eventually.** When one function repackages another's
+result, the test that matters asserts the whole shape survives, not that the one field you were
+thinking about did.
+
+**A tool that shells out to a repo-aware command needs to be told which repo.** Not the manager's
+cwd — the repo the work came out of.
 
 ## Routing work
 
@@ -228,7 +429,7 @@ one the CTO can settle with a single click.
 
 ### `kind` is a closed list
 
-Pick one of these twelve, spelled exactly. It decides who may answer and how loudly the board
+Pick one of these thirteen, spelled exactly. It decides who may answer and how loudly the board
 shouts, so an invented name is not a harmless label.
 
 | `kind` | Use it when |
@@ -245,8 +446,12 @@ shouts, so an invented name is not a harmless label.
 | `looping` | A worker is repeating itself and needs redirecting |
 | `pick_implementation` | Two workable designs, one has to be chosen |
 | `scope_question` | In or out of scope for this piece of work |
+| `stuck_session` | A worker is frozen on a prompt nobody is there to answer |
 
-The first eight always reach a human; the last four the manager may settle alone — except that
+`stuck_session` is the one nothing files by hand: `bin/stuck_sessions.py` files it on a timer,
+and clears it again the moment the session starts moving. See bin/systemd/README.md.
+
+The first eight always reach a human; the last five the manager may settle alone — except that
 evidence overrules the kind, so anything irreversible, dependency-adding, migration-touching,
 secret-adjacent, or aimed at `main` goes to a human whatever it calls itself.
 

@@ -434,3 +434,37 @@ def test_write_prefs_leaves_no_scratch_files_behind(tmp_path):
         ms.write_prefs("claude-sonnet-5", "medium", path=path)
     leftovers = [n for n in os.listdir(tmp_path) if n != "prefs.json"]
     assert not leftovers, f"scratch files left behind: {leftovers}"
+
+
+def test_claude_bin_is_absolute_so_a_systemd_unit_can_find_it():
+    """The live defect: a systemd --user unit inherits the user manager's PATH, which has no
+    ~/.local/bin, so bare "claude" raised FileNotFoundError inside board_state.py. Every caller
+    degraded to an empty list, so the pump published ZERO sessions on every run — the board's
+    session rows went stale, and because the mirror only deletes documents it remembers writing,
+    session orphans became permanently uncleanable."""
+    before = _os.environ.pop("CLAUDE_BIN", None)
+    path_before = _os.environ["PATH"]
+    _os.environ["PATH"] = "/usr/bin:/bin"  # a systemd --user PATH: no ~/.local/bin
+    try:
+        resolved = ms.claude_bin()
+    finally:
+        _os.environ["PATH"] = path_before
+        if before is not None:
+            _os.environ["CLAUDE_BIN"] = before
+
+    assert _os.path.isabs(resolved), f"bare {resolved!r} is exactly what the unit cannot find"
+    assert _os.path.basename(resolved) == "claude"
+
+
+def test_claude_bin_honours_the_same_env_var_the_pump_script_already_uses():
+    """run-board-mirror.sh reads $CLAUDE_BIN for its own `claude -p`. The subprocesses it spawns
+    underneath must resolve the binary the same way, or the two disagree about which CLI runs."""
+    before = _os.environ.get("CLAUDE_BIN")
+    _os.environ["CLAUDE_BIN"] = "/opt/custom/claude"
+    try:
+        assert ms.claude_bin() == "/opt/custom/claude"
+    finally:
+        if before is None:
+            _os.environ.pop("CLAUDE_BIN", None)
+        else:
+            _os.environ["CLAUDE_BIN"] = before

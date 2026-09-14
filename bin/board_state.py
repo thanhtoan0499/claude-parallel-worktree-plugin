@@ -185,6 +185,72 @@ def _contradiction(claim, state: str) -> dict | None:
     return {"claim_phase": claim["phase"], "session_state": state}
 
 
+# The leading "root" of a worktree task name — parallel-task.sh names tend to start with a
+# ticket-ish token (`t8309`) and then a free-text slug. Two names sharing this root but not
+# otherwise equal is the "differs only by a trailing suffix" shape a mis-dispatch takes: the
+# session and the registry entry both extended from the same starting point, by different text.
+_TASK_ROOT = re.compile(r"^[a-z]*\d+")
+
+
+def session_registry_drift(name: str, registry: dict) -> dict | None:
+    """A probable mis-dispatch — `name` matches no registry entry, but some entry shares its
+    leading root and only the trailing suffix differs (`t8309d` vs `t8309-confirm-tool`) — or
+    None.
+
+    None also covers the ordinary case: an ad-hoc session (a spike, a smoke test, someone's own
+    terminal) with no registry entry and nothing resembling it. That is normal and must stay
+    silent — this is deliberately narrower than `managed: false` on its own, which needsAttention()
+    already reads as its own, different signal.
+
+    Never proposes anything (`proposed_state` is always None) — a wrong guess would attach a
+    session to the wrong ticket, worse than an empty card. `registry_name` names the candidate
+    explicitly so a human does not have to go looking for it.
+    """
+    if not isinstance(registry, dict) or name in registry:
+        return None
+    root = _TASK_ROOT.match(name or "")
+    if not root:
+        return None
+    root = root.group(0)
+    for candidate in registry:
+        candidate_root = _TASK_ROOT.match(candidate or "")
+        if candidate != name and candidate_root and candidate_root.group(0) == root:
+            return {
+                "proposed_state": None,
+                "fixable": False,
+                "reason": f'phiên "{name}" không khớp registry — có thể gõ nhầm tên khi giao việc, đúng ra là "{candidate}"',
+                "registry_name": candidate,
+            }
+    return None
+
+
+def registry_key(name: str, registry: dict) -> str:
+    """The registry key this session's display name refers to, or the name unchanged.
+
+    cmew renames a session for display — dispatch `t8419-slug`, `claude agents --json` reports
+    `T8419-slug 🔹`, and an effort=ultracode session carries a 🔥 as well. The registry is keyed
+    by the task name parallel-task.sh dispatched, so an exact-match join misses every worker
+    started this way: the board draws a card with no branch, no worktree, no ticket, and
+    `managed: false` — which reads as somebody's own terminal rather than as work we dispatched.
+    That cost a manual double-registration of every worktree under both spellings on 2026-09-09.
+
+    Exact match first, so a task whose real name happens to differ only by case is never
+    silently folded into another. Only then the display form: trailing decoration stripped,
+    compared case-insensitively.
+    """
+    if not name or not registry:
+        return name
+    if name in registry:
+        return name
+    bare = "".join(ch for ch in name if ch.isalnum() or ch in "-_./").strip().lower()
+    if not bare:
+        return name
+    for key in registry:
+        if str(key).strip().lower() == bare:
+            return key
+    return name
+
+
 def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
                  now: float = 0.0, stale_after: float | None = None) -> dict[str, dict]:
     """One document per live task, keyed by task name.
@@ -222,6 +288,9 @@ def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
             "claim": claim,
             "claim_ignored": ignored,
             "contradiction": _contradiction(claim, state),
+            # Rule C: a probable mis-dispatch, never a plain unmanaged session — see
+            # session_registry_drift()'s docstring for why the two must stay distinct.
+            "state_drift": session_registry_drift(name, registry),
             # True iff parallel-task.sh actually dispatched this task — an entry EXISTS in the
             # registry, not "branch happens to be truthy". A registry row with a blank branch
             # field is still work the manager provisioned; `bool(reg)` or `bool(branch)` would
@@ -237,7 +306,11 @@ def session_docs(agents: list[dict], registry: dict, claims: dict | None = None,
         if not name:
             # A document id cannot be empty; an unnamed agent has no addressable key.
             continue
-        docs[name] = build(name, agent, registry.get(name) or {})
+        # Keyed by the REGISTRY's name, not the display name: every other collection on this
+        # board (assignments' plan owners, a ticket's worker card) joins on the task name
+        # dispatch used, so a doc filed under "T8419-slug 🔹" is a card nothing can reach.
+        key = registry_key(name, registry)
+        docs[key] = build(key, agent, registry.get(key) or {})
     for name in claims:
         if name and name not in docs:
             docs[name] = build(name, {}, registry.get(name) or {})
@@ -380,15 +453,30 @@ def sum_usage(records) -> dict:
     return totals
 
 
+def session_transcripts(session_id: str, projects_root: str = PROJECTS_ROOT) -> list[str]:
+    """Every transcript file for one session id, newest-mtime last, or [] when there is none.
+
+    A worktree session's transcript lives under a project directory named after the WORKTREE
+    path, not the repo root, so the lookup is by session id across every project directory
+    rather than by re-deriving that encoding here.
+    """
+    return sorted(glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl")), key=_mtime)
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def read_session_usage(session_id: str, projects_root: str = PROJECTS_ROOT) -> dict | None:
     """Totals for one session's transcript, or None when there is no transcript to read.
 
     None, never a zeroed dict: "no file" and "a file that recorded nothing" are different facts,
-    and only one of them may reach the page as a number. A worktree session's transcript lives
-    under a project directory named after the WORKTREE path, not the repo root, so the lookup is
-    by session id across every project directory rather than by re-deriving that encoding here.
+    and only one of them may reach the page as a number.
     """
-    matches = glob.glob(os.path.join(projects_root, "*", session_id + ".jsonl"))
+    matches = session_transcripts(session_id, projects_root)
     if not matches:
         return None
     records = []
@@ -707,6 +795,10 @@ def prs_by_ticket(prs: list[dict]) -> dict[str, dict]:
             # decision", not a decision, and it must not read as one.
             "review": pr.get("reviewDecision") or None,
             "checks": check_rollup(pr.get("statusCheckRollup")),
+            # board.html's evidenceDrift() needs this to tell "evidence taken before the fix"
+            # apart from "evidence proves this fix" — a ticket's linked commit date is not
+            # reachable at the same cost, so the PR's own merge date stands in for it.
+            "merged_at": pr.get("mergedAt"),
         }
         for ticket_id, pr in winners.items()
     }
@@ -752,6 +844,19 @@ def check_rollup(rollup) -> str | None:
 # one the localhost dashboard uses — kept here so ticket_status() can reason about it, with a test
 # that fails the moment the two copies disagree.
 TICKET_DONE_STATES = frozenset({"Closed", "Removed", "Done"})
+
+# States where a ticket could actually owe evidence — mirrored in board.html's own
+# EVIDENCE_OWED_STATES for evidenceDrift(), since that check runs client-side (see
+# BRIEF-EVIDENCE-2.md: it only needs `evidence`, `pr` and `state`, all already on the published
+# ticket doc). Kept here too because THIS is what bounds get_ado_attachments() to the tickets
+# that could actually need it — "đừng quét cả backlog".
+EVIDENCE_OWED_STATES = frozenset({"Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"})
+
+
+def _ids_owing_evidence(tickets: list[dict]) -> list[str]:
+    """Ticket ids worth spending an attachments fetch on — bounds get_ado_attachments() to the
+    handful of tickets that could actually owe evidence, not the whole backlog."""
+    return [str(t.get("id")) for t in tickets or [] if t.get("id") and (t.get("state") or "") in EVIDENCE_OWED_STATES]
 
 # Every derived status, in the precedence order ticket_status() applies them. The order IS the
 # argument, so it lives here rather than being implied by the shape of an if-chain:
@@ -812,8 +917,142 @@ def ticket_status(ticket_state, pr: dict | None, claimed: bool, escalated: bool)
     return "waiting_push" if claimed else "unclaimed"
 
 
+# Allowed states by work item type — never assumed to match. A Bug can be Resolved; a Task
+# cannot, and proposing it would be exactly the kind of confidently wrong answer this file exists
+# to stop.
+ALLOWED_TICKET_STATES = {
+    "Task": frozenset({"New", "Active", "Blocked", "Closed", "Removed"}),
+    "Bug": frozenset({
+        "New", "Active", "Blocked", "Resolved",
+        "Ready for QC verify on Stag", "QC Testing on Stag", "Closed",
+    }),
+}
+
+# Any of these three is proof an OPEN PR exists. A ticket sitting at `New` while one of them is
+# true is the provable contradiction: "nobody has started" cannot be true of a ticket with an
+# open PR someone is reviewing, merging, or watching fail CI.
+_PR_PROVES_STARTED = frozenset({"waiting_review", "waiting_merge", "checks_failing"})
+
+# Where a merged Bug goes, and who owns it there. Merged is not verified — but "who verifies"
+# was never an open question, so the hand-off is written and the verification itself stays human.
+# A Task has no such word (its type table has no QC state), so a merged Task still proposes
+# nothing: closing one is a judgement call, and this file never writes Closed.
+_QC_VERIFY_STATE = "Ready for QC verify on Stag"
+
+# The one reason phrase that takes its PR number as a suffix rather than a prefix.
+_REVIEW_BLOCK_PHRASE = "chờ approve PR"
+
+_PR_DRIFT_PHRASE = {
+    "waiting_review": "đang chờ review",
+    "waiting_merge": "đã sẵn sàng merge",
+    "checks_failing": "đang fail checks",
+}
+
+
+def ticket_state_drift(state, work_item_type, derived_status, has_block_reason=None) -> dict | None:
+    """The state ADO should hold when it disagrees with the evidence, or None when they agree.
+
+    `None` also covers a state or work-item-type this file does not recognise — the same
+    fail-toward-silence rule the rest of this file uses for vocabulary it cannot place: guessing a
+    correction for a state nobody named to this function is worse than saying nothing.
+
+    Three contradictions, one shape (`proposed_state` / `reason` / `fixable`):
+      - `New` while the PR proves work has started: the only one with a proposed fix, because it
+        is the only one certain enough to write back — see Part 3's hard limits. Never proposes a
+        state the type does not allow (Bug -> Resolved, Task -> Active; Task has no Resolved).
+      - `merged_not_closed`: worth reporting, proposes nothing — merged is not verified, and that
+        call is a human's.
+      - `Blocked` with no assignment-ledger note explaining it (`has_block_reason=False`; `None`
+        means "not checked" and is silently skipped, never treated as a positive finding of
+        absence): the board is asserting a block it cannot explain. Proposes nothing — the fix is
+        a person writing the reason, not a state moving.
+
+    `reason` is deliberately generic (no ticket-specific PR number) — ticket_docs() is the one
+    with the actual `pr` dict, and folds the number in before publishing.
+    """
+    allowed = ALLOWED_TICKET_STATES.get(work_item_type)
+    if allowed is None or state not in allowed:
+        return None
+
+    if state == "New" and derived_status in _PR_PROVES_STARTED:
+        proposed = "Active" if "Resolved" not in allowed else "Resolved"
+        return {"proposed_state": proposed, "reason": _PR_DRIFT_PHRASE[derived_status], "fixable": True}
+
+    # Active asserts a person is touching this right now. A PR sitting in a review queue is the
+    # opposite of that, and the difference is the whole reason a reader scans the column: a row
+    # that says Active hides an ask, a row that names the ask surfaces it. Bug keeps its more
+    # precise word (Resolved = dev done, awaiting verification); Task, which has no such word,
+    # says what it is actually waiting for.
+    if state == "Active" and derived_status == "waiting_review":
+        if "Resolved" in allowed:
+            return {"proposed_state": "Resolved", "reason": _PR_DRIFT_PHRASE[derived_status],
+                    "fixable": True}
+        return {"proposed_state": "Blocked", "reason": _REVIEW_BLOCK_PHRASE, "fixable": True}
+
+    if derived_status == "merged_not_closed":
+        # Already in the QC queue: the hand-off happened, and re-proposing it every pump cycle
+        # would train the reader to ignore the column.
+        if state == _QC_VERIFY_STATE:
+            return None
+        if _QC_VERIFY_STATE in allowed:
+            return {"proposed_state": _QC_VERIFY_STATE, "reason": "đã merged", "assign_to": "QC",
+                    "fixable": True}
+        return {"proposed_state": None, "reason": "đã merged", "fixable": False}
+
+    if state == "Blocked" and has_block_reason is False:
+        return {
+            "proposed_state": None,
+            "reason": "không có ghi chú CHẶN BỞI: trong sổ giao việc",
+            "fixable": False,
+        }
+
+    return None
+
+
+def _state_drift_doc(state, work_item_type, derived_status, has_block_reason, pr: dict | None) -> dict | None:
+    """`ticket_state_drift()`'s result, enriched with the one thing it cannot know: this
+    ticket's actual PR number — so the published reason names both sides, e.g. "PR #726 đang chờ
+    review", without ticket_state_drift() taking a whole `pr` dict just to read one field.
+    """
+    drift = ticket_state_drift(state, work_item_type, derived_status, has_block_reason)
+    if drift is None:
+        return None
+    reason = drift["reason"]
+    number = (pr or {}).get("number")
+    # Only the PR-shaped reasons ever mention a PR — a Blocked-with-no-note reason has nothing to
+    # do with any PR that ticket happens to also carry. "chờ approve PR" takes the number as a
+    # suffix because that is where it reads as a sentence.
+    if number is not None:
+        if reason == _REVIEW_BLOCK_PHRASE:
+            reason = f"{reason} #{number}"
+        elif reason in (*_PR_DRIFT_PHRASE.values(), "đã merged"):
+            reason = f"PR #{number} {reason}"
+    return {"proposed_state": drift["proposed_state"], "reason": reason,
+            "assign_to": drift.get("assign_to"), "fixable": drift["fixable"]}
+
+
+def _shape_evidence(raw) -> list[dict]:
+    """Coerce dashboard.get_ado_attachments()'s raw per-ticket list into exactly what the page
+    needs — name/url/created — same tolerance as _safe_evidence()/_safe_plan(): a malformed
+    entry is dropped rather than raised on, since ADO's own shape is not a contract this file
+    controls.
+    """
+    return [
+        {"name": item.get("name") or "", "url": item.get("url") or "", "created": item.get("created"),
+         # Only ever set on the verification report — dashboard._attach_report_body() downloads
+         # that one attachment and parses it, because the board cannot link to a report (ADO
+         # serves an .html attachment as a download whatever query string you hand it) and the
+         # evidence column now shows the report INSTEAD of the file list. Absent on every other
+         # attachment, which stays a plain link.
+         **({"body": item["body"]} if isinstance(item.get("body"), dict) and item["body"].get("results") else {})}
+        for item in raw or []
+        if isinstance(item, dict)
+    ]
+
+
 def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | None = None,
-                assignment_refs=None, escalated_refs=None) -> dict[str, dict]:
+                assignment_refs=None, escalated_refs=None, blocked_reason_refs=None,
+                evidence_by_ticket=None) -> dict[str, dict]:
     """One document per ADO work item, keyed by its id.
 
     "Not started", "in flight" and "done this sprint" are filters over `state` + `sprint` on
@@ -837,17 +1076,25 @@ def ticket_docs(tickets: list[dict], pr_by_ticket: dict, owners: list[str] | Non
         ownership = _ticket_ownership(ticket, owners or [])
         key = str(ticket_id)
         pr = (pr_by_ticket or {}).get(key)
+        state = ticket.get("state") or ""
+        derived_status = ticket_status(state, pr, key in assignment_refs, key in escalated_refs)
+        has_block_reason = None if blocked_reason_refs is None else key in blocked_reason_refs
         docs[key] = {
             "id": key,
             "title": ticket.get("title") or "",
-            "state": ticket.get("state") or "",
+            "state": state,
             "sprint": ticket.get("sprint") or "",
             "type": ticket.get("type") or "",
             "url": ticket.get("url") or "",
             "pr": pr,
-            "derived_status": ticket_status(
-                ticket.get("state") or "", pr, key in assignment_refs, key in escalated_refs
-            ),
+            "derived_status": derived_status,
+            # Published BESIDE state and derived_status, never instead of either — see
+            # ticket_state_drift()'s docstring for the three contradictions this can name.
+            "state_drift": _state_drift_doc(state, ticket.get("type") or "", derived_status, has_block_reason, pr),
+            # Only ever populated for tickets in EVIDENCE_OWED_STATES — see collect()'s
+            # _ids_owing_evidence() — so an empty list here means either "not owed" or "owed and
+            # genuinely has none"; board.html's evidenceDrift() tells those apart via `t.state`.
+            "evidence": _shape_evidence((evidence_by_ticket or {}).get(key)),
             "handed_off": ownership["handed_off"],
             "handed_off_to": ownership["handed_off_to"],
         }
@@ -992,6 +1239,22 @@ def _assignment_refs(assignments_docs: dict) -> set[str]:
     }
 
 
+def _blocked_reason_refs(assignments_docs: dict) -> set[str]:
+    """Every ticket a live assignment has already explained being Blocked on.
+
+    `CHẶN BỞI:` in the note is the only machine-readable record of why a ticket is blocked — ADO
+    tags are unwritable for this account (`TF401289: The current user does not have permissions
+    to create tags`). Cancelled is excluded for the same reason _assignment_refs() excludes it: an
+    abandoned assignment's old note explains nothing about why the ticket is blocked today.
+    """
+    return {
+        ref
+        for doc in assignments_docs.values()
+        if doc.get("status") != "cancelled" and "CHẶN BỞI:" in str(doc.get("note") or "")
+        for ref in doc.get("ado_refs") or []
+    }
+
+
 def _escalated_refs(escalations_docs: dict, registry: dict) -> set[str]:
     """Every ticket sitting behind an escalation nobody has answered yet.
 
@@ -1027,6 +1290,7 @@ def build_writes(
     owners=None,
     pump_period_s=None,
     claims=None,
+    evidence_by_ticket=None,
 ) -> list[dict]:
     """Every document to write, in the order to write it.
 
@@ -1034,7 +1298,15 @@ def build_writes(
     straight through without reshaping — the transform is testable here, and the session stays
     a thin courier.
     """
-    writes = []
+    # First, always: proof the pump is alive, and nothing else. It carries no "as of" clock, so
+    # it can never be mistaken for the completeness claim meta/status makes at the other end of
+    # the run. Being first means it rides batch 1, so it lands even on a run that stops part-way
+    # through a backlog — which, since the refresh started checkpointing per batch, is every run
+    # during a drain. meta/status stayed the board's only clock through that change and froze for
+    # the whole drain, so a board with data visibly flowing rendered as hours stale and tripped
+    # the staleness alarm sized off this same cadence. See board_mirror_diff.stamp_heartbeat()
+    # for the batch counts the chunker adds, and bin/systemd/README.md for the field contract.
+    writes = [{"op": "set", "collection": "meta", "doc_id": "pump", "data": {"ran_at": now}}]
     # Built before the tickets, because the tickets' derived status is a join over both: which
     # tickets an assignment owns, and which are stuck behind an escalation nobody has answered.
     # Reusing the folded documents rather than re-walking the raw ledgers is what keeps the
@@ -1045,6 +1317,8 @@ def build_writes(
         tickets, pr_by_ticket, owners,
         assignment_refs=_assignment_refs(assignments_docs),
         escalated_refs=_escalated_refs(escalations_docs, registry),
+        blocked_reason_refs=_blocked_reason_refs(assignments_docs),
+        evidence_by_ticket=evidence_by_ticket,
     )
     for collection, docs in (
         # The claim window is sized off the very cadence stamped onto meta/status below, so the
@@ -1114,6 +1388,7 @@ def collect(
     owners=None,
     read_timer_period=lambda: None,
     read_claims=lambda registry: {},
+    read_evidence=lambda ids: {},
 ) -> list[dict]:
     """Gather every source and return the write set. Readers are injected so this is testable
     without `az`, `gh`, or a live session.
@@ -1161,6 +1436,13 @@ def collect(
         # registry for the same reason `read_usage` does — the registry is what says where each
         # worker's worktree is, and reading it twice would let the two copies disagree.
         claims=_safe(lambda: read_claims(registry), {}, "claims"),
+        # Filtered to EVIDENCE_OWED_STATES BEFORE the reader ever runs — "đừng quét cả backlog" —
+        # so a ticket that could not possibly owe evidence never costs a fetch. {} on failure: a
+        # broken read degrades every evidence-owing ticket's `evidence` list to empty, the same
+        # shape as "checked, found nothing".
+        evidence_by_ticket=_safe(
+            lambda: read_evidence(_ids_owing_evidence(tickets or [])), {}, "evidence"
+        ),
     )
 
 
@@ -1295,6 +1577,7 @@ def main() -> int:
         owners=dashboard._ado_identities(),
         read_timer_period=read_timer_period,
         read_claims=read_worker_claims,
+        read_evidence=dashboard.get_ado_attachments,
     )
     json.dump(writes, sys.stdout, ensure_ascii=False)
     return 0

@@ -86,6 +86,27 @@ runs, that's expected, not a failure. A failed refresh (bad env, `board_state.py
 the session, a malformed `claude -p` reply) shows as `status=1/FAILURE` here and the reason in the
 journal line above it — see `run-board-mirror.sh` for what each exit path logs.
 
+### What the board reads: two clocks, two meanings
+
+The refresh writes two `meta` documents, at opposite ends of the run, and they answer different
+questions. A page that reads only one of them will get the other one's answer wrong.
+
+| document | written | fields | means |
+|---|---|---|---|
+| `meta/pump` | first batch, **every run** | `ran_at` (epoch seconds), `batches_pending` (int ≥ 1) | the pump is alive and started a run at `ran_at`, with `batches_pending` batches to get through. `batches_pending == 1` means this run expects to finish. |
+| `meta/status` | last batch, **only a run that finished** | `written_at`, `last_ado_sweep`, `last_session_scan`, `pump_period_s`, … | every row beside it is complete as of these stamps. |
+
+So: **`meta/pump.ran_at` is the liveness signal, `meta/status.written_at` is the completeness
+signal.** A staleness alarm must be sized off `ran_at` — that is the one that moves every 5
+minutes. `written_at` legitimately sits still for the length of a backlog drain, and treating
+that as "the pump has stopped" raises a false alarm on a healthy pump, which is worse than no
+alarm at all because people learn to ignore it. Use `batches_pending > 1` to say the board is
+still catching up rather than to say it is dead.
+
+`meta/pump` deliberately carries no "as of" clock. It rides the first batch, so it lands before
+the data does; if it stamped a sweep time, a partial run would be claiming rows it has not
+written yet — the exact thing `meta/status` going last exists to prevent.
+
 A journal line reading `run-board-mirror: PARTIAL: wrote 50 documents in 1 of 4 batches, ...` is
 NOT a failure and exits 0. After a large change the refresh is split into 50-document batches and
 a run does as many as fit in its budget, recording each one as it lands; the next fire picks up
@@ -100,3 +121,239 @@ To force one run without waiting for the timer: `systemctl --user start board-mi
 If a run is already in flight, the second one logs `another run holds ... — stepping aside` and
 exits 0 rather than racing it: two runs reading the same snapshot compute their diffs against
 states that have already moved apart, and write over each other.
+
+---
+
+# stuck-session-watch systemd user timer
+
+A dispatched worker that hits a permission prompt it cannot answer stops dead: `claude agents
+--json` reports it `blocked` and it stays that way, because nobody is there to answer. On
+2026-09-09 four sessions sat like that for up to two hours each, and every one was found only
+because the CTO asked why nothing was happening. The state was queryable the whole time; nothing
+carried it anywhere.
+
+This timer runs `bin/stuck_sessions.py`, which carries it — into `escalations.jsonl` as an
+ordinary **open** record, not as something waiting on a human. `manager_daemon.py` then decides it
+like any other tier-2 escalation and degrades it to `needs_human` only once the manager's own
+attempts are exhausted. Three of those four the manager could and did settle itself.
+
+It is read-only with respect to every session it looks at: it never resumes, answers, stops or
+kills anything. The only thing it writes is the queue.
+
+## Why its own timer
+
+Its own unit, not a second `ExecStart` on `board-mirror.service` and not a step inside
+`run-board-mirror.sh`:
+
+* **Its own journal.** `journalctl --user -u stuck-session-watch.service` shows this check and
+  nothing else. Folded into the mirror, a failed scan would be one line inside a four-minute
+  `claude -p` run's output, which is where a silent failure goes to hide.
+* **It must not inherit the mirror's failure modes.** The mirror runs a real Claude session: it
+  can burn its 240s budget, exit `PARTIAL`, or fail on an expired token. This scan is a
+  `claude agents --json` and a few file reads — under a second, no token, no session. Chaining it
+  behind the mirror would let a token problem stop the one check whose entire job is noticing
+  that nothing is happening.
+* **It must survive the manager's session ending**, which is the whole point — so it cannot live
+  in `manager_daemon.py`, which dies with the session that started it.
+
+## Install (a human must do this — nothing here installs itself)
+
+Prerequisite: **linger**, exactly as for board-mirror above. Same command, same reason; if you
+have already done it for board-mirror it is done for this too.
+
+This unit reuses board-mirror's config file for the one variable it needs — `PWT_REPO_ROOT`,
+which says whose `.claude/worktrees/.parallel-registry.json` to join sessions against. If
+board-mirror is installed there is nothing new to fill in. It runs no `claude -p` session, so it
+needs neither `CLAUDE_CODE_ENTRYPOINT` nor a token.
+
+```
+ln -sf "$(pwd)/bin/stuck_sessions.py" ~/.config/board-mirror/stuck_sessions.py
+mkdir -p ~/.config/systemd/user
+ln -sf "$(pwd)/bin/systemd/stuck-session-watch.service" ~/.config/systemd/user/stuck-session-watch.service
+ln -sf "$(pwd)/bin/systemd/stuck-session-watch.timer" ~/.config/systemd/user/stuck-session-watch.timer
+systemctl --user daemon-reload
+systemctl --user enable --now stuck-session-watch.timer
+```
+
+Symlinks, not copies — same upgrade path as board-mirror. `stuck_sessions.py` imports its
+siblings out of the repo `bin/` next to the symlink target, so the checkout stays the source of
+truth.
+
+## Verify
+
+```
+systemctl --user list-timers stuck-session-watch.timer
+journalctl --user -u stuck-session-watch.service -n 20
+```
+
+Every run logs one summary line whether or not it found anything:
+
+```
+stuck-session-watch: 19 live sessions, 0 stuck past 15m, 0 queue writes -> ~/.claude/hermes/escalations.jsonl
+```
+
+The boring line is the point — it is what tells you the timer is alive. A run that files or
+clears something prints a `filed:` / `cleared:` line above it with the task name and record id.
+
+A run that cannot do its job **fails loudly and files nothing**, exiting non-zero so
+`systemctl --user status` shows `status=1/FAILURE`:
+
+| Journal line | What is wrong |
+|---|---|
+| `no parseable cadence in .../stuck-session-watch.timer` | Someone retuned `OnCalendar` to a form `board_state.timer_period_seconds()` cannot read. The silence window is derived from that value, and a guessed window is exactly the failure this repo already shipped once. |
+| `cannot read registry ...` | `PWT_REPO_ROOT` points somewhere with no registry under it. |
+| `` `claude agents --json` returned nothing `` | The CLI failed or timed out. |
+| `skipped N waiting session(s) with no registry row` | **Not** a failure — exit stays 0. But if N is not zero while sessions are visibly frozen, the dispatch path has stopped writing registry rows, and *that* is the bug. A session with no registry row cannot be told apart from somebody's own terminal, so the watch leaves it alone. |
+
+## What it deliberately does not report
+
+The check that ran by hand before this one reported nine stuck sessions of which five were
+corpses — abandoned days or months earlier, three with the worktree already deleted. A
+majority-false alarm gets ignored, and then the real one is ignored too. Four filters, each
+cutting one class of false positive:
+
+| Filter | Why |
+|---|---|
+| `claude agents --json` **without** `--all` | `--all` returns every session the CLI has ever known — 69 here against 19 live, 32 of them for worktrees deleted days or months ago. Those are the corpses. |
+| the worktree still exists | A session whose worktree is gone is dead, not stuck: there is nothing left to unblock, so there is no decision to make. |
+| silent for at least 3 timer periods | Measured from the session transcript's mtime, **not** from `startedAt`. A frozen session writes nothing, so the mtime is when it stopped moving; `startedAt` would have called `fix720` stuck for 2.7h when it had been silent 1.3h, and would call any long-running session stuck one second after its first prompt. No transcript means no measurable duration, and the watch files nothing rather than guess one. |
+| `managed` — a registry entry exists | `board_state.session_docs()`'s own rule, reused rather than restated. A session nobody dispatched is somebody's own terminal, and the human in front of it can answer their own prompt. Counted and reported, never silently dropped. |
+
+Filing is idempotent and self-clearing. A record is filed once per freeze, not once per scan; a
+second scan over the same frozen session writes nothing; and when the session starts moving (or
+drops off the list) the record is dismissed so it stops asking for a decision nobody needs. A
+later freeze of the same session files a fresh record.
+
+---
+
+# manager-keepalive systemd user timer
+
+The resident manager (`cc-manager`, a tmux session — see
+`docs/superpowers/specs/2026-09-10-resident-manager-design.md`) is the only channel a blocked
+worker has: workers reach it with `SendMessage`, and it reaches them the same way. When it is
+gone, a stuck worker has nowhere to send the block, which is exactly the hour of silence that
+spec was written about.
+
+This timer runs `parallel-task.sh manager-start` every 5 minutes. That subcommand is idempotent —
+it refuses harmlessly when `cc-manager` is already up — so the steady state is a no-op and the
+interesting case is the one where the session is missing: after a reboot, after the tmux server
+died, after somebody killed the pane.
+
+## Why a timer and not `Restart=always`
+
+The manager is a tmux pane, not a child of this unit. systemd never sees it exit, so there is
+nothing to restart — the only thing that can notice is something that goes and looks. Polling an
+idempotent start command is that. `OnBootSec=1min` is on the timer as well as the calendar
+schedule, because the first five minutes after a reboot are five minutes with no channel.
+
+## Install (a human must do this — nothing here installs itself)
+
+Prerequisite: **linger**, exactly as for board-mirror above. Same command, same reason.
+
+This unit reuses board-mirror's config file for the one variable it needs: `PWT_REPO_ROOT`.
+`parallel-task.sh` derives its repo from `git rev-parse --show-toplevel` of the **working
+directory**, so that variable is what decides which `.claude/worktrees/.parallel-registry.json`
+the manager's agent name gets recorded in. If board-mirror is installed there is nothing new to
+fill in.
+
+```
+ln -sf "$(pwd)/bin/parallel-task.sh" ~/.config/board-mirror/parallel-task.sh
+mkdir -p ~/.config/systemd/user
+ln -sf "$(pwd)/bin/systemd/manager-keepalive.service" ~/.config/systemd/user/manager-keepalive.service
+ln -sf "$(pwd)/bin/systemd/manager-keepalive.timer" ~/.config/systemd/user/manager-keepalive.timer
+systemctl --user daemon-reload
+systemctl --user enable --now manager-keepalive.timer
+```
+
+Symlinks, not copies — same upgrade path as board-mirror.
+
+## Verify
+
+```
+systemctl --user list-timers manager-keepalive.timer
+journalctl --user -u manager-keepalive.service -n 20
+tmux has-session -t cc-manager && echo "manager is up"
+```
+
+A healthy journal is boring: `manager-start` saying the session already exists, once every five
+minutes. A line about `cmew: command not found` means the `Environment=PATH=` line in the service
+was dropped — see below.
+
+## The PATH trap (read this before editing either manager unit)
+
+A `systemd --user` unit inherits the **user manager's** PATH, which does **not** include
+`~/.local/bin`. Both `cmew` and `claude` live there. A unit without a PATH of its own therefore
+fails with `command not found` on a command that works perfectly in any login shell — and the
+journal line names the command, not the reason, so it reads like a broken install.
+
+The repo has paid for this twice already and fixed it locally both times:
+`run-board-mirror.sh` defaults `CLAUDE_BIN` to an absolute path, and `manager_session.claude_bin()`
+does the same for Python callers. Neither helps here, because these two units execute scripts they
+do not own. So the fix is in the unit:
+
+```
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+```
+
+Whole PATH, not just the missing entry: `tmux` is under `/usr/bin`, and a tmux **server** first
+started by this unit hands its own environment to every session it later spawns — including the
+manager's own `claude`. `bin/test_manager_units.py` pins this line so a future edit cannot quietly
+drop it.
+
+---
+
+# manager-daemon systemd user timer
+
+`bin/manager_daemon.py` does the two things the manager cannot do for itself while it is busy: a
+periodic pass over the escalation queue, and delivering an answer the CTO pressed on the board into
+the manager's session. Nothing else calls that code — without this timer an escalation is filed and
+then sits there, which is the second of the three failures the resident-manager spec measured.
+
+**The timer is the tick.** The daemon does one pass and exits; the 5-minute `OnCalendar` is what
+makes it periodic. `TimeoutStartSec=240` is the guard on that contract: an entry point that loops
+forever instead of returning gets killed and shows up as `status=1/FAILURE` rather than sitting
+active forever and swallowing every later fire.
+
+## Install (a human must do this — nothing here installs itself)
+
+Prerequisite: **linger**, as above. Reuses board-mirror's config file for `PWT_REPO_ROOT`, which
+`manager_session.resolve_repo_root()` reads to decide where the manager's `claude` subprocess runs
+— a systemd unit's working directory is `/`, so leaving it to the CWD fallback would point it at
+no checkout at all.
+
+```
+ln -sf "$(pwd)/bin/manager_daemon.py" ~/.config/board-mirror/manager_daemon.py
+mkdir -p ~/.config/systemd/user
+ln -sf "$(pwd)/bin/systemd/manager-daemon.service" ~/.config/systemd/user/manager-daemon.service
+ln -sf "$(pwd)/bin/systemd/manager-daemon.timer" ~/.config/systemd/user/manager-daemon.timer
+systemctl --user daemon-reload
+systemctl --user enable --now manager-daemon.timer
+```
+
+Symlinks, not copies. `manager_daemon.py` imports its siblings out of the repo `bin/` next to the
+symlink target (Python resolves the link before setting `sys.path[0]`), so the checkout stays the
+source of truth — same as `stuck_sessions.py`.
+
+## Verify
+
+```
+systemctl --user list-timers manager-daemon.timer
+journalctl --user -u manager-daemon.service -n 30
+```
+
+Each run prints what it settled and what it could not; a pass with an empty queue prints the
+watching line and nothing else. `status=1/FAILURE` with the run cut off at four minutes means the
+pass did not return — see the timer contract above, not the queue.
+
+## The four timers in this directory
+
+| Timer | Fires | Does |
+|---|---|---|
+| `manager-daemon.timer` | `:01`, `:06`, … | one escalation pass |
+| `board-mirror.timer` | `:02`, `:07`, … | refresh the board artifact |
+| `manager-keepalive.timer` | `:03`, `:08`, … | restart `cc-manager` if it is gone |
+| `stuck-session-watch.timer` | `:04`, `:09`, … | file frozen workers into the queue |
+
+Every 5 minutes, each on its own minute. Two of them drive the `claude` CLI, and staggering them
+is what keeps those two from contending; `bin/test_manager_units.py` fails if a new timer lands on
+a minute that is already taken.

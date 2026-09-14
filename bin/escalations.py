@@ -86,7 +86,14 @@ SENSITIVE_PATH_MARKERS = (
     "alembic/",
 )
 
-_TIER2_KINDS = {"red_tests", "looping", "pick_implementation", "scope_question"}
+# `stuck_session` is tier 2 on purpose. A worker frozen on a prompt nobody will answer is the
+# MANAGER's problem first: of the four that sat frozen on 2026-09-09 it could and did settle three
+# itself (swap an `rm -rf` for `vite --force`, run a `git checkout` on the worker's behalf, tell one
+# that had already finished to just deliver its report) and exactly one — a `docker cp` permission
+# — genuinely needed the CTO. Filing it as a human's call by default would have been wrong three
+# times out of four. The evidence overrides below still promote it to tier 3 on their own terms,
+# and `decide()` still degrades to a human whenever the manager cannot settle it.
+_TIER2_KINDS = {"red_tests", "looping", "pick_implementation", "scope_question", "stuck_session"}
 _TIER3_KINDS = {
     "irreversible",
     "push_or_pr",

@@ -252,7 +252,8 @@ def get_sessions() -> list[dict]:
 
     def run():
         result = subprocess.run(
-            ["claude", "agents", "--json", "--all"], capture_output=True, text=True, check=True, timeout=20
+            [manager_session.claude_bin(), "agents", "--json", "--all"],
+            capture_output=True, text=True, check=True, timeout=20,
         )
         return json.loads(result.stdout)
 
@@ -270,16 +271,9 @@ def get_github_prs(repo_root: str) -> list[dict]:
     updates REPO_DIR — the same trap read_registry() in board_state.py works around already.
     """
 
-    def run():
+    def gh_pr_list(state, fields):
         result = subprocess.run(
-            # `reviewDecision` and `statusCheckRollup` ride along on the call that was already
-            # being made — `gh` returns them for free and a second call would double the sweep's
-            # latency AND be able to disagree with the first about which PRs exist. They are what
-            # lets the board tell "waiting for review" from "waiting for someone to click merge",
-            # which is the whole difference between a ticket needing a person and a ticket needing
-            # the CTO. See board_state.prs_by_ticket()/ticket_status().
-            ["gh", "pr", "list", "--state", "all", "--limit", "500", "--json",
-             "number,title,url,state,isDraft,reviewDecision,statusCheckRollup"],
+            ["gh", "pr", "list", "--state", state, "--limit", "500", "--json", fields],
             capture_output=True,
             text=True,
             check=True,
@@ -287,6 +281,35 @@ def get_github_prs(repo_root: str) -> list[dict]:
             cwd=repo_root,
         )
         return json.loads(result.stdout)
+
+    def run():
+        # `reviewDecision` rides along free; `statusCheckRollup` does NOT. GitHub resolves the
+        # check rollup per PR, so asking for it across `--state all --limit 500` took 42.5s
+        # against this call's own 20s timeout — measured on the repo the board pump actually
+        # sweeps. Every run hit the timeout, fell back to {} and blanked the board's PR column,
+        # while still spending 20s of the pump's budget to do it.
+        #
+        # Split, measured on that same repo: the wide sweep without the rollup is 12.5s for all
+        # 500 PRs, and an open-only rollup lookup is 1.6s for the 11 that have one. Nothing is
+        # lost — board_state.ticket_status() reads `checks` only inside `if pr["state"] ==
+        # "OPEN"`, so the rollup was being fetched for 489 PRs that never consult it. A merged
+        # PR's CI is history, not a signal.
+        #
+        # Two calls CAN disagree about which PRs exist, which is why the second is joined onto
+        # the first by number rather than replacing it: a PR that closed between the two simply
+        # gets no rollup, and one that opened is absent from the wide sweep either way.
+        # mergedAt rides along free on this same wide sweep — board_state.evidence_drift() needs
+        # it to tell "evidence taken before the fix" apart from "evidence proves this fix", and a
+        # ticket's linked commit date is not reachable at this cost (see get_ado_attachments()).
+        prs = gh_pr_list("all", "number,title,url,state,isDraft,reviewDecision,mergedAt")
+        rollups = {
+            pr.get("number"): pr.get("statusCheckRollup")
+            for pr in gh_pr_list("open", "number,statusCheckRollup")
+        }
+        for pr in prs:
+            if pr.get("state") == "OPEN" and pr.get("number") in rollups:
+                pr["statusCheckRollup"] = rollups[pr["number"]]
+        return prs
 
     return _cached(f"github_prs:{repo_root}", run, ttl=_ENRICH_TTL)
 
@@ -327,6 +350,19 @@ def _ado_assignee_clause() -> str:
     id_fields = ("[System.AssignedTo]", "[Microsoft.VSTS.Common.ActivatedBy]")
     people = [p.replace("'", "''") for p in _ado_identities()]
     if not people:
+        # Said out loud, because this is the one degradation here that looks exactly like a
+        # correct answer: @Me returns a real, well-formed, SHORTER backlog. Measured on this
+        # project 2026-09-09 — two identities union to 168 tickets, @Me alone returns 21 — so a
+        # run that loses this variable publishes an eighth of the board with no error anywhere,
+        # and board_mirror_diff.py reconciles the missing seven eighths away. run-board-mirror.sh
+        # guards ARTIFACT_URL and PWT_REPO_ROOT with `:?` and cannot guard this one, because a
+        # single-identity install is a legitimate configuration; a journal line is what makes the
+        # difference between the two visible after the fact.
+        print(
+            "dashboard: PWR_ADO_ASSIGNED_TO is unset — the backlog covers only the identity `az` "
+            "is logged in as (WIQL @Me), not every identity of the board owner",
+            file=sys.stderr,
+        )
         return "(" + " OR ".join(f"{f} = @Me" for f in id_fields) + ")"
     joined = ", ".join(f"'{p}'" for p in people)
     return "(" + " OR ".join(f"{f} IN ({joined})" for f in id_fields) + ")"
@@ -334,7 +370,8 @@ def _ado_assignee_clause() -> str:
 
 def _ado_backlog_wiql() -> str:
     return (
-        "SELECT [System.Id], [System.Title], [System.State], [System.IterationPath], "
+        "SELECT [System.Id], [System.Title], [System.State], [System.WorkItemType], "
+        "[System.IterationPath], "
         "[System.AssignedTo], [Microsoft.VSTS.Common.ActivatedBy] FROM WorkItems "
         f"WHERE [System.TeamProject] = '{_ADO_PROJECT}' AND {_ado_assignee_clause()} "
         "AND [System.State] <> 'Removed' "
@@ -350,6 +387,10 @@ def _shape_ado_ticket(raw: dict) -> dict:
         "id": ticket_id,
         "title": fields.get("System.Title") or "",
         "state": fields.get("System.State") or "",
+        # Every ticket_state_drift() rule keys on this: Bug has Resolved and a QC-verify state,
+        # Task has neither, and a type the rule cannot place makes it return None. Left out of
+        # the query, the rules were live and correct and fired on nothing.
+        "type": fields.get("System.WorkItemType") or "",
         # Only the leaf of the iteration path — "AgentIQ\\Sprint 57" is how ADO stores it and
         # "Sprint 57" is the only part anyone filters by. Tickets parked at the project root
         # have no sprint leaf to speak of and come back "".
@@ -373,10 +414,26 @@ def _ado_identity_ref(value) -> dict:
 
 
 def get_ado_backlog() -> list[dict]:
-    """Tickets assigned to you, not closed — the manager's read-only view into ADO. Any
-    failure (az not authenticated, network down) degrades to an empty backlog, same as every
-    other subprocess-backed source in this file — a dashboard that can't reach ADO still shows
-    live sessions."""
+    """Tickets assigned to you, not closed — the manager's read-only view into ADO.
+
+    RAISES when the sweep did not run, and returns [] only for a sweep that ran and matched
+    nothing. Those two were the same value here until 2026-09-09, and collapsing them is what
+    let a failed `az` call delete ticket rows off the published board: board_state.py's contract
+    (see its `read_tickets=` comment) is that only an exception means "did not run", and a
+    function written never to raise made that contract unenforceable — `_safe` stamped
+    last_ado_sweep on a sweep that never happened, and board_mirror_diff.py turned the resulting
+    empty ticket set into a delete per row.
+
+    This is the one reader in this file that does NOT degrade to empty, on purpose. The others
+    (get_ado_iterations, get_registry) degrade because their failure costs a derived nicety;
+    this one's failure costs the rows themselves. Both callers are already built for it:
+    board_state.py wraps it in `_safe()`, and /api/ado-tickets already answers 500 on any
+    exception — a better answer for a human than an empty table that reads as a finished sprint.
+
+    `az` prints `null`, not `[]`, when the query matches nothing. That IS a successful empty
+    sweep, so it is normalized to [] here rather than left to raise on iteration — otherwise the
+    one case the contract calls "successful and empty" would be reported as a failure.
+    """
 
     def run():
         result = subprocess.run(
@@ -386,10 +443,11 @@ def get_ado_backlog() -> list[dict]:
             timeout=20,
         )
         if result.returncode != 0:
-            return []
-        rows = json.loads(result.stdout)
+            raise RuntimeError(
+                f"az boards query exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+            )
         tickets = []
-        for r in rows:
+        for r in json.loads(result.stdout) or []:
             fields = r.get("fields") or {}
             tickets.append(
                 {
@@ -400,10 +458,122 @@ def get_ado_backlog() -> list[dict]:
             )
         return tickets
 
+    return _cached("ado_backlog", run, ttl=60.0)
+
+
+def get_ado_attachments(ids: list[str]) -> dict[str, list[dict]]:
+    """Evidence — ADO `AttachedFile` relations — for a SMALL set of tickets, in one batch REST
+    call rather than one `az` invocation per ticket.
+
+    `az boards query` (get_ado_backlog's own WIQL) never returns relations at all, and `az boards
+    work-item show --expand relations` is a per-id call — so the only way to keep this cheap
+    regardless of ticket count is `_apis/wit/workitemsbatch`, called through `az rest` (same `az`
+    session/auth get_ado_backlog already uses, no separate credential). Callers are expected to
+    have already filtered `ids` down to tickets that could actually owe evidence
+    (board_state.EVIDENCE_OWED_STATES) — this function only fetches, it does not filter by state.
+
+    Raises rather than degrading to `{}` on failure, deliberately matching get_ado_backlog's own
+    contract and for the identical reason: a caller that treats a failed read as "checked, found
+    nothing" would flag every evidence-owing ticket as OWING on every `az` hiccup. `{}` for an
+    empty `ids` is the one legitimate empty case — nothing to check costs nothing, not even a
+    subprocess call.
+    """
+    ids = [str(i) for i in ids if i]
+    if not ids:
+        return {}
+
+    # curl + PAT, not `az rest`: this org's REST API is unreachable through the az session —
+    # without --resource az cannot derive an AAD resource at all, and WITH the ADO resource id it
+    # answers "Identity ... has not been materialized". The PAT attach_evidence.py already uses is
+    # the credential that provably works here. Read fresh per call, never logged, never cached.
+    from attach_evidence import read_pat
+
+    pat = read_pat()
+    result = subprocess.run(
+        [
+            "curl", "-sS", "-u", f":{pat}",
+            "-H", "Content-Type: application/json",
+            "--data-binary", json.dumps({"ids": [int(i) for i in ids], "$expand": "relations"}),
+            f"{_ADO_ORG}/{_ADO_PROJECT}/_apis/wit/workitemsbatch?api-version=7.1",
+        ],
+        capture_output=True, text=True, timeout=20,
+    )
+    if result.returncode != 0:
+        # stderr only — a curl command line carrying `-u :<pat>` must never reach a log or the
+        # board's error surface.
+        raise RuntimeError(
+            f"workitemsbatch: curl exited {result.returncode}: {(result.stderr or '').strip()[:300]}"
+        )
     try:
-        return _cached("ado_backlog", run, ttl=60.0)
-    except _SUBPROC_ERRORS:
-        return []
+        payload = json.loads(result.stdout)
+    except ValueError as exc:
+        # Exit code 0 with an HTML sign-in page is exactly how this endpoint refuses a bad
+        # credential. Letting json.loads raise puts a JSONDecodeError several frames from the
+        # cause and names neither the call nor the reason.
+        raise RuntimeError(
+            f"workitemsbatch: response is not JSON ({exc}): {result.stdout.strip()[:200]}"
+        ) from exc
+    attachments: dict[str, list[dict]] = {i: [] for i in ids}
+    for item in payload.get("value") or []:
+        wid = str(item.get("id"))
+        for rel in item.get("relations") or []:
+            if rel.get("rel") != "AttachedFile":
+                continue
+            attrs = rel.get("attributes") or {}
+            attachments.setdefault(wid, []).append({
+                "name": attrs.get("name") or "",
+                "url": rel.get("url") or "",
+                "created": attrs.get("resourceCreatedDate"),
+            })
+    for wid, rows in attachments.items():
+        _attach_report_body(rows, pat)
+    return attachments
+
+
+# Written by evidence_report.py, one per ticket. The board's evidence column shows THIS and
+# nothing else — the file list it replaced answered "are there attachments" and never "do they
+# prove anything".
+# The .json twin, not the .html: the board builds the report with its own h() helper. Assigning
+# innerHTML fails silently inside the artifact sandbox, so handing the page markup would leave a
+# blank cell and no error anywhere.
+_REPORT_NAME_RE = re.compile(r"^report-AB\d+\.json$", re.IGNORECASE)
+# Prose for ~10 requirements runs a few KB. Anything approaching this is carrying bytes that
+# do not belong in a prompt.
+_MAX_REPORT_BYTES = 64 * 1024
+
+
+def _attach_report_body(rows: list[dict], pat: str) -> None:
+    """Download the ticket's verification report and hang it, parsed, off its own attachment row.
+
+    Best-effort per ticket: a report that will not download or will not parse leaves the row
+    exactly as it was, and the evidence column falls back to saying no report exists. One bad
+    attachment must not cost the whole board its evidence data.
+    """
+    # Newest, not first: a ticket accumulates one report relation per submission, and the oldest
+    # is the one least likely to describe the code that is actually merged.
+    candidates = [r for r in rows if _REPORT_NAME_RE.match(r.get("name") or "") and r.get("url")]
+    if not candidates:
+        return
+    row = max(candidates, key=lambda r: r.get("created") or "")
+    sep = "&" if "?" in row["url"] else "?"
+    result = subprocess.run(
+        ["curl", "-sS", "-u", f":{pat}", f"{row['url']}{sep}fileName={row['name']}&download=false"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        return
+    # A report big enough to matter cannot survive the trip: the board's writes go through a
+    # `claude -p` prompt, and a large blob comes back recomposed rather than copied. Dropping it
+    # here makes the column say "chưa có báo cáo" — visibly wrong, and therefore fixable — instead
+    # of publishing a document a model improvised.
+    if len(result.stdout) > _MAX_REPORT_BYTES:
+        return
+    if isinstance(report, dict) and report.get("results"):
+        row["body"] = report
 
 
 def _iteration_leaves(node: dict) -> list[dict]:
@@ -427,9 +597,10 @@ def _iteration_leaves(node: dict) -> list[dict]:
 def get_ado_iterations() -> list[dict]:
     """Every sprint/iteration this project defines, with its date range — the ONLY place sprint
     boundaries live. A ticket's `System.IterationPath` is just a name; ADO never puts a date on
-    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Same
-    degrade-to-empty contract as get_ado_backlog(): `az` failing must not blank the board, it
-    just leaves board_state.py unable to compute a default sprint filter."""
+    the ticket itself, so knowing which sprint is "today" requires this separate lookup. Unlike
+    get_ado_backlog(), this one DOES degrade to empty: `az` failing here costs only the default
+    sprint filter (the page falls back to "tất cả"), never a row, so there is nothing for a
+    caller to tell apart."""
 
     def run():
         result = subprocess.run(

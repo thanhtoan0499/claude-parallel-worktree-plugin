@@ -1,0 +1,32 @@
+[Unit]
+Description=Bring the resident manager session (tmux cc-manager) back if it is gone
+# Deliberately no `After=network-online.target`, for the same reason board-mirror.service gives:
+# a --user unit cannot usefully gate on a system target across an `enable-linger` boot, and
+# `parallel-task.sh manager-start` already fails loudly rather than silently on a cold machine.
+
+[Service]
+Type=oneshot
+# A `systemd --user` unit inherits the user manager's PATH, which does NOT include ~/.local/bin —
+# where both `cmew` and `claude` live. Without this line manager-start dies on
+# "cmew: command not found" even though the identical command works in any login shell.
+# run-board-mirror.sh solves the same trap for itself (CLAUDE_BIN defaults to an absolute path)
+# and manager_session.claude_bin() for itself again; this unit runs a script it does not own, so
+# the fix belongs here. `tmux` is under /usr/bin and would be found either way — but a tmux
+# SERVER first started by this unit hands its own environment to every session it later spawns,
+# so the whole PATH is set, not just the one directory that is missing.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+# Reused as-is from board-mirror, for the one variable this needs: PWT_REPO_ROOT.
+EnvironmentFile=%h/.config/board-mirror/env
+# parallel-task.sh takes its repo from `git rev-parse --show-toplevel` of the CWD, so the working
+# directory — not where the script sits — decides which .claude/worktrees/.parallel-registry.json
+# manager-start records the manager's agent name into. WorkingDirectory= cannot read an
+# EnvironmentFile variable (systemd expands specifiers there, not environment), so the `cd` is
+# done in a one-line shell instead of stating the checkout path a second time in this file and
+# letting the two drift. PWT_REPO_ROOT unset means `cd ""`, which fails and takes the unit with
+# it — the same fail-loud-on-missing-config shape run-board-mirror.sh uses.
+# The ExecStart target is a symlink to the checked-out bin/parallel-task.sh, not a copy: README.md.
+ExecStart=/bin/sh -c 'cd "$PWT_REPO_ROOT" && exec "%h/.config/board-mirror/parallel-task.sh" manager-start'
+# manager-start boots a TUI and waits for it to reach a prompt — tens of seconds, not
+# milliseconds. Generous for that, and still comfortably under the 5-minute timer cadence so a
+# start that hangs fails loudly instead of blocking every later fire.
+TimeoutStartSec=180

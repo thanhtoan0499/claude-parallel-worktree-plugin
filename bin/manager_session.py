@@ -11,10 +11,30 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+
+def claude_bin() -> str:
+    """Absolute path to the `claude` CLI. Bare "claude" is not on every PATH this code runs under.
+
+    A systemd --user unit inherits the user manager's PATH, which does NOT include ~/.local/bin.
+    Under board-mirror.service every `claude` subprocess here therefore raised FileNotFoundError,
+    and each caller's degrade-to-empty turned that into a plausible "no sessions running" — so the
+    pump published ZERO sessions on every run for the life of that bug. Two consequences, both
+    silent: the board's session rows went stale, and since the mirror only deletes documents it
+    remembers writing, no session orphan could ever be cleaned up again (verified 2026-09-09 —
+    the live snapshot held 0 session keys while the artifact db still held rows last touched
+    two days earlier).
+
+    $CLAUDE_BIN first: run-board-mirror.sh already reads exactly that variable for its own
+    `claude -p` call, having hit this same PATH problem and fixed it only for itself — the fix
+    never reached the subprocesses board_state.py spawns underneath it.
+    """
+    return os.environ.get("CLAUDE_BIN") or shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
+
 
 HERMES_DIR = os.path.expanduser("~/.claude/hermes")
 STATE_PATH = os.path.join(HERMES_DIR, "manager-session.json")
@@ -212,7 +232,7 @@ def ask_argv(session_id, text: str, model: str = None, effort: str = None) -> li
     the stored session, so omitting it on a resume silently downgrades the manager.
     """
     argv = [
-        "claude",
+        claude_bin(),
         "--model", model or MANAGER_MODEL,
         "--effort", effort or MANAGER_EFFORT,
         "--output-format", "json",

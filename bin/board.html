@@ -244,6 +244,17 @@
   .esc-session { font-size: var(--fs-sm); color: var(--faint); }
   .esc-options { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
   .esc-no-options { font-size: var(--fs-sm); color: var(--faint); font-style: italic; }
+  /* An answer button is the one control on this page that changes anything, so it reads as a
+     button rather than as a .chip the options used to be — same shape as .refresh-btn. */
+  .esc-answer {
+    font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer;
+    padding: 4px 12px; border-radius: var(--radius-s);
+    border: 1px solid var(--border); background: var(--surface); color: var(--ink);
+  }
+  .esc-answer:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-strong); }
+  .esc-answer:disabled { cursor: default; opacity: .6; }
+  .esc-answer-picked { border-color: var(--accent); color: var(--accent-strong); background: var(--surface-2); }
+  .esc-answer-error { color: var(--bad-ink); font-weight: 600; }
   /* Supporting detail (reason/evidence/tier), always last in the card, set off from the
      question+options above it by a thin rule so the card stays scannable at a glance. */
   .esc-evidence { display: flex; flex-direction: column; gap: 3px; padding-top: 5px; border-top: 1px dashed var(--border-soft); }
@@ -299,6 +310,75 @@
   table.tickets tbody tr:hover { background: var(--surface-hover); }
   table.tickets td.num { font-family: var(--font-mono); white-space: nowrap; }
   table.tickets td.title-cell { max-width: 420px; }
+  /* Ticket 8172 alone carries 18 attachments — this scrolls inside its own cell so the row
+     never forces the whole board (.table-wrap already scrolls too, but a single monster cell
+     would still stretch every other column with it) to scroll sideways. */
+  /* One file per line. The first shape was a 220px sideways scroller, which let a single long
+     attachment name fill the cell and hide every sibling behind a scrollbar the reader has to
+     notice, aim at and drag — once per row. Stacked and truncated, the count and the first
+     names are readable without any interaction at all; the full name is one hover away. */
+  /* The report is the cell. It needs room the old three-chips-and-a-count list never did. */
+  .evidence-cell > details.collapsed-group { width: 100%; margin-top: 0; }
+  .evidence-cell > details.collapsed-group > summary { font-size: var(--fs-sm); font-weight: 600; }
+  /* The report renders IDENTICALLY here and in the html file a person downloads, because both
+     read the same stylesheet: everything between the markers below is evidence_report.CSS,
+     verbatim. test_board_state.py fails if the two ever differ, and names the one-liner that
+     re-syncs them — two renderers are unavoidable (innerHTML is inert in this sandbox, and
+     injecting attachment-sourced markup would be an XSS surface), two LOOKS are not. */
+  /* == report css: generated from evidence_report.CSS — do not hand-edit == */
+.rpt{--bg:#fbfbfa;--fg:#1c1c1a;--muted:#6b6b66;--line:#e2e1dc;--card:#fff;
+--ok:#1a7f4b;--okbg:#e7f5ec;--warn:#9a6400;--warnbg:#fdf3df;--bad:#b3261e;--badbg:#fbe9e7;--acc:#2b5fa8;
+background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+@media(prefers-color-scheme:dark){.rpt{--bg:#16171a;--fg:#e8e8e4;--muted:#9a9a94;
+--line:#2e3034;--card:#1d1f23;--ok:#6fd39b;--okbg:#16301f;--warn:#e0b25a;--warnbg:#332816;
+--bad:#f2938c;--badbg:#3a1c1a;--acc:#83b0ef}}
+.rpt *{box-sizing:border-box}
+.rpt main{max-width:840px;margin:0 auto;padding:34px 22px 60px}
+.rpt h1{font-size:21px;line-height:1.3;margin:0 0 4px;color:var(--fg)}
+.rpt h2{font-size:15px;margin:32px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line);
+text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+.rpt .sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+.rpt .meta{display:flex;flex-wrap:wrap;gap:6px 22px;font-size:12.5px;color:var(--muted);
+border:1px solid var(--line);background:var(--card);border-radius:8px;padding:11px 15px}
+.rpt .meta b{color:var(--fg);font-weight:600}
+.rpt table{width:100%;border-collapse:collapse;font-size:13.5px;margin:0}
+.rpt th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
+font-weight:600;padding:0 9px 6px 0;border-bottom:1px solid var(--line);background:none}
+.rpt td{padding:10px 9px 10px 0;border-bottom:1px solid var(--line);vertical-align:top;background:none}
+.rpt td.req{width:29%;font-weight:600}
+.rpt .v{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.rpt .v.ok{background:var(--okbg);color:var(--ok)}.rpt .v.warn{background:var(--warnbg);color:var(--warn)}
+.rpt .v.bad{background:var(--badbg);color:var(--bad)}
+.rpt ul.ev{margin:0;padding:0;list-style:none}
+.rpt ul.ev li{margin-bottom:9px}.rpt ul.ev li:last-child{margin-bottom:0}
+.rpt ul.ev a,.rpt ul.ev code{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--acc)}
+.rpt .what{color:var(--muted);font-size:12.5px;margin-top:2px}
+.rpt pre{background:var(--card);border:1px solid var(--line);border-radius:7px;padding:11px 13px;
+overflow-x:auto;font-size:11.5px;line-height:1.5;margin:6px 0 0;color:var(--fg);white-space:pre}
+.rpt .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:700px){.rpt .cols{grid-template-columns:1fr}.rpt td.req{width:auto}}
+.rpt .lbl{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+.rpt .lbl.r{color:var(--bad)}.rpt .lbl.g{color:var(--ok)}
+.rpt td.code{font-family:ui-monospace,Menlo,monospace;font-weight:600;width:66px}
+.rpt td.why{color:var(--muted);font-size:12.5px}
+.rpt blockquote{margin:0 0 12px;padding:9px 14px;border-left:3px solid var(--acc);background:var(--card);font-size:14px}
+.rpt figure{margin:12px 0 0}
+.rpt figure img{width:100%;border:1px solid var(--line);border-radius:7px;display:block}
+.rpt figcaption{color:var(--muted);font-size:12px;margin-top:5px}
+.rpt code{font-family:ui-monospace,Menlo,monospace;font-size:.9em}
+.rpt a{color:var(--acc)}.rpt p{margin:8px 0}
+.rpt ul.plain{margin:6px 0;padding-left:19px}.rpt ul.plain li{margin-bottom:6px}
+  /* == end report css == */
+  /* Board-only: the report has its own page (#bao-cao/<id>), so it just needs a surface. It is
+     never boxed or collapsed — cramming a verification report into one table cell is what this
+     route replaced. */
+  .rpt { background: var(--surface); border: 1px solid var(--border-soft);
+    border-radius: var(--radius-m); box-shadow: var(--shadow); }
+  .report-nav { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    font-size: var(--fs-sm); margin-bottom: 12px; }
+  .report-back { font-weight: 600; }
+  a.report-open { text-decoration: none; }
+  a.report-open:hover { background: var(--accent); color: var(--accent-ink); }
 
   details.collapsed-group { margin-top: 2px; }
   details.collapsed-group > summary {
@@ -317,9 +397,36 @@
   .a-card > details.collapsed-group { margin-top: 0; }
   .a-card > details.collapsed-group > summary { flex-wrap: wrap; font-weight: 500; }
   .a-card .a-title { font-size: var(--fs-md); font-weight: 600; color: var(--ink); }
-  .a-card .a-facts { font-size: var(--fs-sm); color: var(--ink-soft); font-weight: 400; }
+  /* The card's whole collapsed line, stacked top-to-bottom instead of wrapped left-to-right — the
+     shape a square grid tile needs. Title, status badges, then one fact per row, in the order the
+     CTO read them back to us: status, duration, token, ticket, steps, estimate. */
+  .a-card .a-card-body { display: flex; flex-direction: column; gap: 4px; width: 100%; }
+  .a-card .a-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  /* Detail parked on title=: the owner/hạn/sau of a step not started yet, and the names of the
+     steps already behind us. Hover was the CTO's own suggestion, so the cursor and a dotted rule
+     have to say the hover is there — neither property moves a box, so nothing here can widen the
+     card on a narrow window. Touch, which has no hover, reads the same steps in the open card. */
+  .a-card .session-row .v[title], .a-card .session-row .v [title] {
+    cursor: help; text-decoration: underline dotted var(--border); text-underline-offset: 2px;
+  }
   .a-card > details.collapsed-group[open] > summary { border-bottom: 1px dashed var(--border-soft); }
   .a-card > details.collapsed-group > :not(summary) { margin-top: 6px; }
+
+  /* "Việc đã giao" as squares a manager can scan at a glance, not a full-width stack. Collapses to
+     one column on its own once the board is too narrow for a second — no media query needed.
+     align-items: start keeps a card that auto-opens (needsAttention) from stretching every other
+     tile in its row to match its height, which is grid's default. */
+  .assignment-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px;
+    align-items: start;
+  }
+  @keyframes a-card-flash-kf {
+    0%, 100% { box-shadow: var(--shadow); }
+    25% { box-shadow: var(--shadow), 0 0 0 3px var(--accent); }
+  }
+  /* A link from the Backlog table jumps here and opens the card (jumpToAssignment()) — this is
+     the one flash of colour that says "you landed here", then gets out of the way on its own. */
+  .a-card-flash { animation: a-card-flash-kf 1.6s ease-out; }
 
   @media (max-width: 640px) {
     .app { padding: 14px 14px 44px; }
@@ -439,20 +546,42 @@ const BLOCKED_KIND_LABEL = {
 // question and only that question: whose move is it now. "Active" answers it for nobody, which is
 // how five tickets — one needing a merge click, one a reviewer, one a product decision, one a
 // push — all read identically.
-const DERIVED_STATUS_LABEL = {
-  waiting_decision: "chờ quyết định", checks_failing: "CI đang đỏ",
-  waiting_merge: "chờ bấm merge", waiting_review: "chờ review",
-  merged_not_closed: "đã merge, vé chưa đóng", waiting_push: "chờ đẩy code lên",
-  unclaimed: "chưa ai nhận",
+
+// The second half of a Backlog row's "Tóm tắt": whose move it is, said as a move rather than as
+// a phase name — the same seven keys ticket_status() emits, turned into the sentence a manager
+// acts on rather than the phase's name. `null` is
+// deliberately absent — a ticket with nothing left to chase is handled by ticketSummary() itself.
+const SUMMARY_BLOCKER = {
+  waiting_decision: "CẦN ANH QUYẾT",
+  checks_failing: "CI đỏ — phải sửa trước khi review",
+  waiting_merge: "đã duyệt — chờ bấm merge",
+  waiting_review: "chờ TL duyệt",
+  merged_not_closed: "chờ QC xác nhận",
+  waiting_push: "chờ đẩy code lên",
+  unclaimed: "chưa giao việc",
 };
-// `waiting_merge` is green and not merely "another state": it is the only one of these whose next
-// move belongs to the person reading the board, so it has to be findable at a glance.
-const DERIVED_STATUS_TONE = {
-  waiting_decision: "pill-bad", checks_failing: "pill-bad",
-  waiting_merge: "pill-good", waiting_review: "pill-accent",
-  merged_not_closed: "pill-warn", waiting_push: "pill-warn",
-  unclaimed: "pill-neutral",
-};
+
+// Mirrors board_state.EVIDENCE_OWED_STATES — this is what bounds get_ado_attachments() to the
+// tickets that could actually need it, so the two must never drift apart (a test pins this).
+const EVIDENCE_OWED_STATES = new Set(["Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"]);
+
+// "missing" / "stale" / null — whether a ticket that could owe evidence actually has proof it was
+// verified. Pure and JS-only: t.evidence, t.pr and t.state are all already on the published
+// ticket doc, so there is nothing a server-side computation would add.
+//
+// "missing" and "stale" are told apart on purpose — this is exactly how AB#6541 escaped QC for
+// 14 days: verify screenshots dated before the fix shipped do not prove the fix. `stale` is only
+// ever checked against the PR's own merge date (pr.mergedAt) — a ticket's linked commit date is
+// not reachable at the same cost — and is skipped (not guessed at) when that date is unknown.
+function evidenceDrift(t, attachments, pr) {
+  if (!EVIDENCE_OWED_STATES.has(t.state)) return null;
+  const list = Array.isArray(attachments) ? attachments : [];
+  if (!list.length) return "missing";
+  const mergedAt = pr && pr.mergedAt ? Date.parse(pr.mergedAt) : NaN;
+  if (isNaN(mergedAt)) return null;
+  const newest = Math.max(...list.map((e) => Date.parse(e.created)).filter((ts) => !isNaN(ts)));
+  return newest < mergedAt ? "stale" : null;
+}
 
 const RESOLVED_STATUSES = new Set(["answered", "dismissed"]);
 // Same list the localhost dashboard uses for "not done" vs "done" — keep the two boards agreeing
@@ -474,6 +603,7 @@ const KIND_GLOSS = {
   cost_anomaly: "chi phí bất thường",
   worktree_collision: "đụng worktree với phiên khác",
   diff_review: "cần review diff",
+  stuck_session: "phiên đứng im, không ai trả lời prompt",
 };
 
 /* ---------- tiny DOM builder ----------
@@ -547,11 +677,13 @@ function sessionLabel(sessionId) {
 }
 
 /* ---------- shared state ---------- */
-const view = { sessions: [], escalations: [], tickets: [], assignments: [], meta: null, db: null };
+// `answers` is the only collection this page WRITES (see sendAnswer) — it is read back too, so a
+// card can say a choice is recorded but not yet in the manager's ledger.
+const view = { sessions: [], escalations: [], tickets: [], assignments: [], answers: [], meta: null, db: null };
 // Extra bookkeeping alongside the required `view` shape above — which source has fired at least
 // once (so "empty" and "not loaded yet" never look the same) and which source's listener died.
-view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
-view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, meta: false };
+view.loaded = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
+view.errors = { sessions: false, escalations: false, tickets: false, assignments: false, answers: false, meta: false };
 // Describes the "Làm mới" button, not a data source: whether a manual read is in flight, and
 // why the last one failed.
 view.refresh = { busy: false, error: null };
@@ -581,6 +713,62 @@ function collapsedGroup(label, rows, openHint) {
 }
 
 /* ---------- escalations ---------- */
+// Answering, from the board itself. The chosen option is written to `escalation_answers/<id>` —
+// deliberately NOT into `escalations`, which is the pump's own write set: anything put there
+// would be overwritten by the next mirror run, or deleted outright once the document dropped out
+// of board_state.py's output. The pump reads this collection back on its next run and
+// bin/systemd/board_mirror_answers.py decides what may be appended to the manager's ledger, so
+// nothing here is the decision — this only records what the CTO picked. One pump cycle later the
+// escalation's own status flips to "answered" and the card moves to the resolved group below.
+const ANSWERS_COLLECTION = "escalation_answers";
+const answerState = new Map();   // escalation id -> "busy" while a write is in flight, else why it failed
+
+async function sendAnswer(esc, option) {
+  if (!view.db || answerState.get(esc.id) === "busy") return;
+  answerState.set(esc.id, "busy");
+  render();
+  try {
+    // set(), not update(): this is the whole document, and the first pick has nothing to merge
+    // into. A second pick before the pump runs simply replaces it — last click wins, one document.
+    await view.db.doc(ANSWERS_COLLECTION + "/" + esc.id).set({ answer: option, at: Date.now() });
+    answerState.delete(esc.id);
+  } catch (e) {
+    console.error("sendAnswer", e);
+    answerState.set(esc.id, "Không ghi được lựa chọn — thử lại, hoặc trả lời ở dashboard cục bộ (cổng 4400).");
+  }
+  render();
+}
+
+// Buttons only for a record genuinely waiting on a human, and only for options the worker itself
+// offered — board_mirror_answers.py accepts nothing else, so anything wider here would be a
+// control that silently does nothing. `open` is excluded on purpose: the manager daemon is still
+// deciding those, and answering one here would race it.
+function answerControls(esc, options) {
+  const answerable = view.db && esc.status === "needs_human" && esc.answer == null && options.length > 0;
+  if (!answerable) {
+    return [
+      options.length
+        ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
+        : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
+      h("div", { class: "esc-session" }, "chưa trả lời được ở đây — dùng dashboard cục bộ (cổng 4400)."),
+    ];
+  }
+  const state = answerState.get(esc.id);
+  const picked = view.answers.find((a) => a.id === esc.id);
+  return [
+    h("div", { class: "esc-options" }, options.map((opt) => h("button", {
+      class: picked && picked.answer === opt ? "esc-answer esc-answer-picked" : "esc-answer",
+      type: "button",
+      disabled: state === "busy" ? "" : null,
+      onclick: () => sendAnswer(esc, opt),
+    }, opt))),
+    picked
+      ? h("div", { class: "esc-session" }, "đã chọn: " + picked.answer + " — chờ bơm ghi vào sổ escalation (≤ 1 chu kỳ).")
+      : null,
+    state && state !== "busy" ? h("div", { class: "esc-session esc-answer-error" }, state) : null,
+  ].filter(Boolean);
+}
+
 function escalationCard(esc) {
   const sev = esc.severity in SEVERITY_RANK ? esc.severity : "P2";
   const drift = esc.kind !== esc.kind_raw;
@@ -609,13 +797,7 @@ function escalationCard(esc) {
     ),
     h("div", { class: "esc-question" }, esc.question || "(không có nội dung câu hỏi)"),
     h("div", { class: "esc-session" }, "phiên: " + sessionLabel(esc.session)),
-    // Read-only mirror (step 1 of the migration): these are the options the worker offered, not
-    // buttons — nothing here can deliver an answer to the worker yet, so a clickable-looking
-    // button would be a dead end. The line below says where answering actually still works.
-    options.length
-      ? h("div", { class: "esc-options" }, options.map((opt) => h("span", { class: "chip" }, opt)))
-      : h("div", { class: "esc-no-options" }, "worker không đưa ra lựa chọn nào"),
-    h("div", { class: "esc-session" }, "chỉ xem ở đây — trả lời tại dashboard cục bộ (cổng 4400)."),
+    answerControls(esc, options),
     // Supporting detail — why this reached a human, and what it touches — always last so the
     // question and options above stay the first thing scanned.
     esc.reason ? h("div", { class: "esc-session" }, "vì sao: " + esc.reason) : null,
@@ -716,7 +898,11 @@ function sessionTile(s) {
     h("div", { class: "state-badge b-" + state },
       h("span", { class: "state-dot" + (state === "waiting" ? " dot-waiting" : "") }),
       STATE_LABEL[state] || s.state || "?"),
-    h("div", { class: "session-task" }, s.task || s.id),
+    h("div", { class: "session-task" }, s.task || s.id,
+      // Rule C: a probable mis-dispatch — this session's name matches no registry entry, but one
+      // differs only by a trailing suffix. Same .drift idiom as the ticket row (Part 2) — one
+      // wording style, and board_state.py's reason already names both names.
+      s.state_drift ? h("span", { class: "drift", title: s.state_drift.reason }, "⚠") : null),
     h("div", { class: "session-row" }, h("span", { class: "k" }, "nhánh"),
       h("span", { class: "v" }, s.branch || "—")),
     h("div", { class: "session-row" }, h("span", { class: "k" }, "chạy"),
@@ -781,6 +967,23 @@ function looseSessions(assignments, sessions) {
 }
 
 /* ---------- assignments: the ledger, and the sessions working it ---------- */
+// What a plan step is doing right now — shared between the assignment card below and the
+// Backlog's "Tóm tắt" column (ticketSummary(), near ticketRow()) so the two can never
+// describe the same running step differently. Same fallback-to-unknown rule sessionTile() uses
+// for a session state nobody has labelled.
+function stepState(s) {
+  return Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
+}
+function planSteps(a) {
+  return Array.isArray(a.plan) ? a.plan : [];
+}
+function stepText(s) {
+  return s.step || "(bước không có mô tả)";
+}
+function doingSteps(a) {
+  return planSteps(a).filter((s) => stepState(s) === "doing");
+}
+
 function assignmentCard(a, sessions) {
   const sev = a.priority in SEVERITY_RANK ? a.priority : "P1";
   const known = Object.prototype.hasOwnProperty.call(ASSIGNMENT_STATUS_LABEL, a.status);
@@ -791,7 +994,38 @@ function assignmentCard(a, sessions) {
   // transcript, and one derivation means the numbers and the step list under them cannot
   // disagree. `progress` is still published for the localhost dashboard but no longer read here:
   // it rendered "0%" beside "0/7 bước", which is the same sentence twice.
-  const doneSteps = steps.filter((s) => s.state === "done").length;
+  // Bucketed once, rendered three times — the count on the collapsed line, the hover hint beside
+  // it and the rows inside the card are one derivation, so they cannot come to disagree. The
+  // normalisation is sessionTile()'s: a state nobody listed is "unknown" and gets said as such,
+  // never quietly folded into "chưa làm", because that would read as "not started yet".
+  const doneList = steps.filter((s) => stepState(s) === "done");
+  const doing = doingSteps(a);
+  const todo = steps.filter((s) => stepState(s) === "todo");
+  const unclear = steps.filter((s) => stepState(s) === "unknown");
+  const doneSteps = doneList.length;
+  // Who, by when, and after what. Real detail, but secondary to "where is this work" by
+  // definition — so it hangs off title= instead of sitting on the row: no JS, no layout, and the
+  // opened card still names every step for a touch device that can never hover.
+  const stepDetail = (s) => {
+    const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
+    return [
+      s.owner ? "ai: " + s.owner : null,
+      s.eta ? "hạn: " + s.eta : null,
+      deps.length ? "sau: " + deps.join(", ") : null,
+    ].filter(Boolean).join(" · ") || null;
+  };
+  // Said, never inferred. A missing "đang làm" row would read as "nothing left to run" — the same
+  // mistake renderAssignments() refuses to make when the sessions listener is down.
+  const noRunner = "chưa có bước nào đang chạy";
+  const stepRow = (k, v, title) => h("div", { class: "session-row" },
+    h("span", { class: "k" }, k), h("span", { class: "v", title: title || null }, v));
+  // The answer the opened card gives, one hover away. The CTO asked for it on expand OR hover,
+  // and hover is the one a collapsed board gets for nothing.
+  const stepHint = !steps.length ? null
+    : (doing.length ? "đang làm: " + doing.map(stepText).join(" · ")
+      : todo.length || unclear.length ? noRunner
+      : "tất cả các bước đã xong")
+      + (todo.length ? " · còn lại " + todo.length + " bước" : "");
   const tokens = a.tokens && typeof a.tokens === "object" ? a.tokens : null;
   const eta = a.eta && typeof a.eta === "object" ? a.eta : null;
   // The sessions actually doing this work, and the ones among them that have stopped and are
@@ -818,29 +1052,39 @@ function assignmentCard(a, sessions) {
     if (projected) etaParts.push("ước lượng suy ra từ tốc độ đã đo: còn ~" + projected);
   }
 
+  // No priority pill. It opened every card and was the least useful thing on it — the CTO does not
+  // triage by P0/P1/P2 ("tôi ko quan tâm P1 hay quan trọng mức thấp gì hết"), the manager does.
+  // `priority` itself is untouched: it still tints this card's left edge, still decides the order
+  // in renderAssignments(), and board_state.py still publishes it for the localhost dashboard.
+  // Reading order the CTO gave us back, verbatim: title, status, how long it has run, tokens
+  // (only when measured — "token chưa rõ" on every single tile said nothing), the ticket, which
+  // step is running, and the estimate (only when there is one to show).
   const summary = [
-    pill(SEVERITY_TONE[sev] || "pill-neutral", sev + " · " + (SEVERITY_LABEL[sev] || "")),
-    pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
-      known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
-    a.at_risk ? pill("pill-bad", "trễ hạn") : null,
-    a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
-    // The alarm the standalone sessions section used to carry, moved onto the one line that is
-    // visible whether or not this card is open.
-    attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null,
-    h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
-    // Which ticket this card is for, on the line visible whether or not the card is open — a
-    // reader scanning the collapsed board must not have to click in to find out.
-    refs.length ? h("span", { class: "session-refs" }, refs.map((id) => {
-      const url = ticketUrl(id);
-      return url
-        ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
-        : h("span", { class: "chip" }, "AB#" + id);
-    })) : null,
-    h("span", { class: "a-facts mono" },
-      steps.length ? doneSteps + "/" + steps.length + " bước" : "chưa có kế hoạch",
-      " · chạy " + (durationText(a.elapsed_seconds) || "chưa rõ"),
-      " · token " + spendText,
-      " · xong: " + (etaParts.length ? etaParts.join(" · ") : "chưa rõ")),
+    h("div", { class: "a-card-body" },
+      h("span", { class: "a-title" }, a.title || "(không có tiêu đề)"),
+      h("div", { class: "a-badges" },
+        pill(known ? ASSIGNMENT_STATUS_TONE[a.status] : "pill-neutral",
+          known ? ASSIGNMENT_STATUS_LABEL[a.status] : "trạng thái không rõ"),
+        a.at_risk ? pill("pill-bad", "trễ hạn") : null,
+        a.stalled ? pill("pill-warn", "chưa ai chia bước") : null,
+        // The alarm the standalone sessions section used to carry, moved onto the one line that is
+        // visible whether or not this card is open.
+        attention.length ? pill("pill-bad", attention.length + " phiên cần bạn xử lý") : null),
+      stepRow("chạy", durationText(a.elapsed_seconds) || "chưa rõ"),
+      spend != null ? stepRow("token", spendText) : null,
+      // Which ticket this card is for, on the line visible whether or not the card is open — a
+      // reader scanning the collapsed board must not have to click in to find out.
+      refs.length ? h("div", { class: "session-refs" }, refs.map((id) => {
+        const url = ticketUrl(id);
+        return url
+          ? h("a", { class: "chip", href: url, target: "_blank", rel: "noopener" }, "AB#" + id)
+          : h("span", { class: "chip" }, "AB#" + id);
+      })) : null,
+      steps.length
+        ? h("div", { class: "session-row" }, h("span", { class: "k" }, "bước"),
+            h("span", { class: "v", title: stepHint }, doneSteps + "/" + steps.length + " bước"))
+        : stepRow("bước", "chưa có kế hoạch"),
+      etaParts.length ? stepRow("xong", etaParts.join(" · ")) : null),
   ];
 
   // Everything below only exists once the card is opened. The note is a paragraph of prose and
@@ -853,19 +1097,29 @@ function assignmentCard(a, sessions) {
       h("span", { class: "v" }, a.deadline || "—")),
     cacheText ? h("div", { class: "session-row" }, h("span", { class: "k" }, "cache"),
       h("span", { class: "v" }, cacheText)) : null,
+    // Where the work is, not a transcript of how it got there. One row per bucket instead of one
+    // per step: the finished ones collapse to a count (their names are on the hover — nobody needs
+    // to re-read what is already behind them), the running one is spelled out with the owner and
+    // date a manager would actually act on, and what is left is named so "what is left" is legible
+    // without reading a row each. A row per step was this card's previous shape and the verdict on
+    // it was "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì".
     steps.length
-      ? h("div", { class: "esc-evidence" }, steps.map((s) => {
-          const st = Object.prototype.hasOwnProperty.call(STEP_STATE_LABEL, s.state) ? s.state : "unknown";
-          const deps = Array.isArray(s.depends_on) ? s.depends_on : [];
-          const extra = [
-            s.owner ? "ai: " + s.owner : null,
-            s.eta ? "hạn: " + s.eta : null,
-            deps.length ? "sau: " + deps.join(", ") : null,
-          ].filter(Boolean).join(" · ");
-          return h("div", { class: "session-row" },
-            h("span", { class: "k" }, STEP_STATE_LABEL[st]),
-            h("span", { class: "v" }, (s.step || "(bước không có mô tả)") + (extra ? " (" + extra + ")" : "")));
-        }))
+      ? h("div", { class: "esc-evidence" },
+          doneSteps
+            ? stepRow("đã xong", doneSteps + "/" + steps.length + " bước",
+                doneList.map(stepText).join(" · "))
+            : null,
+          doing.length
+            ? stepRow("đang làm", doing.map((s) => {
+                const d = stepDetail(s);
+                return stepText(s) + (d ? " (" + d + ")" : "");
+              }).join(" · "))
+            : (todo.length || unclear.length ? stepRow("đang làm", noRunner) : null),
+          todo.length
+            ? stepRow("còn lại", todo.map((s, i) =>
+                h("span", { title: stepDetail(s) }, (i ? " · " : "") + stepText(s))))
+            : null,
+          unclear.length ? stepRow("không rõ", unclear.map(stepText).join(" · ")) : null)
       : h("div", { class: "esc-no-options" }, "chưa chia thành bước nào"),
     a.note ? h("div", { class: "esc-session" }, "ghi chú: " + a.note) : null,
   ];
@@ -875,7 +1129,7 @@ function assignmentCard(a, sessions) {
   // exactly the rule .esc-card.sev-* already carries. Condensed by default is the whole point —
   // the single exception is a card holding a worker that has stopped and is waiting for a person.
   // That one opens itself, because a click is precisely what nobody makes before it matters.
-  return h("div", { class: "esc-card a-card sev-" + sev },
+  return h("div", { class: "esc-card a-card sev-" + sev, id: a.id != null ? "assign-" + a.id : null },
     collapsedGroup(summary, detail, attention.length > 0));
 }
 
@@ -914,7 +1168,7 @@ function renderAssignments() {
   cards.sort((x, y) => Number(y.mine.some(needsAttention)) - Number(x.mine.some(needsAttention)));
 
   if (!open.length) section.append(goodNote("Không có việc nào đang mở."));
-  else section.append(h("div", { class: "esc-list" }, cards.map((c) => assignmentCard(c.a, c.mine))));
+  else section.append(h("div", { class: "assignment-grid" }, cards.map((c) => assignmentCard(c.a, c.mine))));
 
   // Done and cancelled stay on the board, collapsed — board_state.py deliberately keeps mirroring
   // them, so dropping them here would throw away the record it went to the trouble of publishing.
@@ -923,7 +1177,7 @@ function renderAssignments() {
   // below instead, which opens itself.
   if (closed.length) {
     section.append(collapsedGroup(closed.length + " việc đã đóng",
-      [h("div", { class: "esc-list" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
+      [h("div", { class: "assignment-grid" }, closed.slice().sort(byUrgency).map((a) => assignmentCard(a)))]));
   }
 
   // Everything no open assignment claims — an ad-hoc terminal, or a worker whose assignment was
@@ -942,12 +1196,239 @@ function renderAssignments() {
 }
 
 /* ---------- tickets ---------- */
+// Which assignment, if any, has claimed a ticket — the same ado_refs join needsAttention()'s
+// sibling helpers already run for sessions, aimed at tickets instead. Pure and parameterised so
+// it runs outside the page too (see test_board_state.py's node-backed tests).
+function assignmentForTicket(ticketId, assignments) {
+  return assignments.find((a) => Array.isArray(a.ado_refs) &&
+    a.ado_refs.some((r) => String(r) === String(ticketId)));
+}
+
+// One cell, two halves: how far the work got, and what stands in the way. It deliberately does
+// NOT list the running step — that detail lives on the assignment card below, and repeating it
+// here made the row long enough that the blocker (the part worth acting on) scrolled out of view.
+//
+// A recorded block reason wins outright. It already names who is blocking and on what, which is
+// strictly more than any derived phrase can say; pairing the two would dilute the specific with
+// the generic.
+function ticketSummary(t, assignments) {
+  const claimant = assignmentForTicket(t.id, assignments);
+  if (claimant && claimant.status === "blocked" && String(claimant.note || "").trim()) {
+    return String(claimant.note).trim();
+  }
+
+  // Third clause (BRIEF-EVIDENCE-2.md Part 4), on every path below — including "xong": a Closed
+  // ticket with nothing left to chase is exactly the shape EVIDENCE_OWED_STATES covers, so
+  // "hết việc" and "verified" must not be allowed to look like the same claim. Reads
+  // evidenceDrift() directly rather than recomputing it, so this line and the "Bằng chứng"
+  // column can never disagree about the same ticket.
+  const needsVerify = evidenceDrift(t, t.evidence, t.pr) ? " · CHƯA VERIFY" : "";
+
+  const blocker = t.derived_status ? SUMMARY_BLOCKER[t.derived_status] || t.derived_status : null;
+  // Nothing left to chase. "xong" is a claim the row can stand behind: derived_status is null
+  // only when the ticket is done AND its PR merged (see ticket_status in board_state.py).
+  if (!blocker) return "xong" + needsVerify;
+
+  // The PR number belongs to whoever has to open it, so it rides along with the review/merge ask
+  // rather than sitting in a column of its own repeating the same number.
+  const withPr = (t.pr && t.pr.number && (t.derived_status === "waiting_review" ||
+    t.derived_status === "waiting_merge" || t.derived_status === "checks_failing"))
+    ? blocker + " PR #" + t.pr.number
+    : blocker;
+
+  const progress = [];
+  if (claimant) {
+    const steps = planSteps(claimant);
+    const done = steps.filter((s) => stepState(s) === "done").length;
+    progress.push(steps.length ? "xong " + done + "/" + steps.length + " bước" : "chưa chia bước");
+  } else if (t.pr && t.pr.state === "MERGED") {
+    progress.push("code đã merge");
+  }
+  return (progress.length ? progress.join(" · ") + " · " + withPr : withPr) + needsVerify;
+}
+
+// A Backlog row's "Chờ ai" cell jumps here: opens the assignment card's closed <details> and
+// gives it one flash so the eye catches where it landed — a link to still-closed content is
+// useless.
+function jumpToAssignment(id) {
+  const el = document.getElementById("assign-" + id);
+  if (!el) return;
+  const details = el.querySelector("details.collapsed-group");
+  if (details) details.open = true;
+  el.classList.remove("a-card-flash");
+  void el.offsetWidth; // restart the animation on a second jump to the same card
+  el.classList.add("a-card-flash");
+}
+
 function ticketStateTone(state) {
   if (state === "Blocked") return "pill-bad";
   if (state === "Active") return "pill-accent";
   if (state === "Resolved") return "pill-good";
   return "pill-neutral";
 }
+// The tooltip for state_drift's warning icon — names both sides the way board_state.py's
+// state_drift.reason was built to be read: "ADO ghi <state> nhưng <reason>". Pure so it is
+// testable outside the page, the same as assignmentForTicket()/ticketCurrentAction() above.
+function ticketDriftTitle(t) {
+  if (!t.state_drift) return null;
+  return "ADO ghi " + (t.state || "—") + " nhưng " + t.state_drift.reason;
+}
+// The "Bằng chứng" column (BRIEF-EVIDENCE-2.md Part 3): clickable straight to the artifact, and a
+// ticket that owes evidence reads as owing it — reusing evidenceDrift() rather than recomputing
+// it, so this cell and Part 4's ticketSummary() line can never disagree about the same ticket.
+// A ticket that owes nothing stays quiet ("—"): no green tick, which would be noise on every row
+// that simply isn't done yet.
+// ADO stores an AttachedFile relation's url WITHOUT a filename, and that bare endpoint answers
+// `application/octet-stream` + `content-disposition: attachment` — so every click saves a file
+// instead of showing it. Handing it a fileName whose extension ADO recognises flips the response
+// to the real content type with no disposition header, and the browser renders it in the tab.
+// (Checked against a live attachment on 2026-09-10: bare url and `?download=false` alone both
+// still download; it is the fileName that decides.)
+function evidenceHref(url, name) {
+  const safe = safeHref(url);
+  if (!safe) return null;
+  const sep = safe.includes("?") ? "&" : "?";
+  return safe + sep + "fileName=" + encodeURIComponent(name || "file") + "&download=false";
+}
+
+const REPORT_TONE = { "đạt": "ok", "đạt một phần": "warn", "chưa chứng minh": "warn", "không đạt": "bad" };
+
+// Every builder below emits the SAME tags and classes as evidence_report.render()'s html, so the
+// one stylesheet above dresses both and the report reads identically in the board and in the file
+// a person downloads. A parity test pins the tag/class set; keep the two in step when either moves.
+function reportEvidence(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  const files = list.filter((e) => e && !e.src);
+  const shots = list.filter((e) => e && e.src);
+  return [
+    files.length
+      ? h("ul", { class: "ev" }, files.map((e) =>
+          h("li", {},
+            e.href
+              ? h("a", { href: safeHref(e.href), target: "_blank", rel: "noopener" }, e.file)
+              : h("code", {}, e.file),
+            h("div", { class: "what" }, e.proves || ""))))
+      : null,
+    // The screenshot is served by the artifact itself ("/_blob/<id>", written by the report's
+    // bundle). The sandbox blocks images from any other host, and a cross-site ADO request would
+    // not carry the session cookie either — a remote src renders an empty box with no error.
+    shots.map((e) => {
+      const img = h("img", { src: e.src, alt: e.proves || e.file });
+      return h("figure", {},
+        e.href ? h("a", { href: safeHref(e.href), target: "_blank", rel: "noopener" }, img) : img,
+        h("figcaption", {}, e.proves || ""));
+    }),
+  ];
+}
+
+function reportSection(title, ...body) {
+  return body.flat(Infinity).some((x) => x) ? [h("h2", {}, title), ...body] : null;
+}
+
+// The report, built the same way every other part of this page is built. It arrives as data
+// (dashboard._attach_report_body) rather than markup because assigning innerHTML is inert in the
+// artifact sandbox — a blank cell, no error, nobody the wiser — and because markup that came off
+// an ADO attachment has no business being injected into a published page.
+function reportNode(r) {
+  const meta = [["PR", r.pr && "#" + r.pr], ["Commit", r.commit], ["Người chạy", r.run_by],
+                ["Lúc", r.run_at], ["Môi trường", r.env]]
+    .filter(([, v]) => v)
+    .map(([k, v]) => h("span", {}, h("b", {}, k + " "), String(v)));
+
+  const req = r.requirement || {};
+  const rows = (r.results || []).map((x) => h("tr", {},
+    h("td", { class: "req" }, x.req),
+    h("td", {}, h("span", { class: "v " + (REPORT_TONE[x.verdict] || "warn") }, x.verdict)),
+    h("td", {}, reportEvidence(x.evidence), x.note ? h("div", { class: "what" }, x.note) : null)));
+
+  const rg = r.red_green || {};
+  const ck = (r.checklist_text ? Object.keys(r.checklist_text) : []).map((key) => {
+    const val = (r.checklist || {})[key];
+    const done = val === true;
+    return h("tr", {},
+      h("td", { class: "code" }, key),
+      h("td", {}, r.checklist_text[key]),
+      h("td", {}, h("span", { class: "v " + (done ? "ok" : "warn") }, done ? "xong" : "chưa")),
+      h("td", { class: "why" }, done ? "" : String(val || "")));
+  });
+
+  const typeLabel = { bug: "Bug", task: "Task", doc: "Tài liệu" }[r.type] || r.type || "";
+  return h("div", { class: "rpt" }, h("main", {},
+    h("h1", {}, "AB#" + r.ticket + " — " + (r.title || "")),
+    h("p", { class: "sub" }, [typeLabel, r.sprint, r.subtitle].filter(Boolean).join(" · ")),
+    h("div", { class: "meta" }, meta),
+    reportSection("Vé yêu cầu gì",
+      req.text ? h("blockquote", {}, req.source ? h("b", {}, req.source + " — ") : null, req.text) : null,
+      reportEvidence(req.evidence)),
+    reportSection("Đã sửa gì",
+      (r.changed || []).length ? h("ul", { class: "plain" }, (r.changed || []).map((c) => h("li", {}, c))) : null),
+    h("h2", {}, "Kết quả"),
+    h("table", {}, h("thead", {}, h("tr", {},
+      h("th", {}, r.type === "doc" ? "Mục" : "Yêu cầu"), h("th", {}),
+      h("th", {}, r.type === "doc" ? "Nội dung — ở đâu" : "Bằng chứng — chứng minh điều gì"))),
+      h("tbody", {}, rows)),
+    reportSection("Gỡ thay đổi ra thì test đỏ",
+      rg.how ? h("p", { class: "what" }, rg.how) : null,
+      rg.red && rg.green
+        ? h("div", { class: "cols" },
+            h("div", {}, h("div", { class: "lbl r" }, "đã gỡ"), h("pre", {}, rg.red)),
+            h("div", {}, h("div", { class: "lbl g" }, "khôi phục"), h("pre", {}, rg.green)))
+        : null),
+    reportSection("Còn vướng · cần quyết",
+      (r.blockers || []).length
+        ? h("ul", { class: "plain" }, (r.blockers || []).map((b) => h("li", {}, b)))
+        : null),
+    h("h2", {}, "Checklist DoD"),
+    h("table", {}, h("tbody", {}, ck))));
+}
+
+// The route a report opens at. A hash, not a modal: the back button works, the URL is copyable,
+// and the report gets the whole page instead of a table cell it never fitted in.
+const REPORT_ROUTE = "#bao-cao/";
+function reportTicketId() {
+  const hash = String(location.hash || "");
+  return hash.startsWith(REPORT_ROUTE) ? hash.slice(REPORT_ROUTE.length) : null;
+}
+function reportFor(id) {
+  const t = view.tickets.find((x) => String(x.id) === String(id));
+  const hit = (t && Array.isArray(t.evidence) ? t.evidence : []).find((e) => e && e.body && e.body.results);
+  return hit ? hit.body : null;
+}
+
+// One item, not nineteen. The file list this replaced could say "9 tệp" and never say whether any
+// of them proved anything — the report is the only artefact that ties each file to a requirement,
+// so it is the only artefact this column shows. A ticket with attachments but no report is not
+// "has evidence": it is a submission nobody has written up, and it reads that way.
+function evidenceCell(t) {
+  const items = Array.isArray(t.evidence) ? t.evidence : [];
+  const report = items.find((e) => e && e.body && e.body.results);
+  if (report) {
+    return h("a", { class: "pill pill-accent report-open", href: REPORT_ROUTE + t.id,
+      style: "text-decoration:none;" }, "📋 Mở báo cáo");
+  }
+  const drift = evidenceDrift(t, items, t.pr);
+  if (drift === "missing") return pill("pill-bad", "chưa có bằng chứng");
+  if (drift === "stale") return pill("pill-warn", "bằng chứng cũ hơn bản sửa");
+  if (!items.length) return "—";
+  return pill("pill-warn", "chưa có báo cáo · " + items.length + " tệp");
+}
+
+// The report on its own page. Nothing else renders while this is open — a verification report is
+// something you sit and read, not something you squint at inside one cell of a twenty-row table.
+function renderReportPage(id) {
+  const r = reportFor(id);
+  const back = h("a", { class: "report-back", href: "#" }, "← quay lại bảng");
+  if (!r) {
+    return h("section", { class: "board-section" }, back,
+      errorNote("Chưa có báo cáo cho AB#" + id + " — vé chưa nộp, hoặc bảng chưa đồng bộ xong."));
+  }
+  const url = ticketUrl(id);
+  return h("section", { class: "board-section" },
+    h("div", { class: "report-nav" }, back,
+      url ? h("a", { href: url, target: "_blank", rel: "noopener" }, "mở vé AB#" + id + " trên ADO") : null),
+    reportNode(r));
+}
+
 function ticketPrChip(pr) {
   if (!pr) return null;
   const tone = pr.state === "MERGED" ? "pill-good" : pr.state === "OPEN" ? "pill-accent" : "pill-neutral";
@@ -960,6 +1441,10 @@ function ticketPrChip(pr) {
 function ticketRow(t, opts) {
   opts = opts || {};
   const href = safeHref(t.url);
+  // The one place a Backlog row jumps to the card actually working it — assignmentForTicket()
+  // is the join, assignmentCard()'s "assign-"+id is the anchor it jumps to.
+  const claimant = assignmentForTicket(t.id, view.assignments);
+  const summary = ticketSummary(t, view.assignments);
   const cells = [
     h("td", { class: "num" }, href
       ? h("a", { href, target: "_blank", rel: "noopener" }, "AB#" + t.id)
@@ -969,13 +1454,22 @@ function ticketRow(t, opts) {
     // is what the board derived from the evidence — and where the two disagree, that is itself
     // the thing worth seeing. A null derived status means there is genuinely nothing left to
     // chase (a closed ticket whose PR merged), never "unknown".
-    h("td", {}, pill(ticketStateTone(t.state), t.state || "—")),
-    h("td", {}, t.derived_status
-      ? pill(DERIVED_STATUS_TONE[t.derived_status] || "pill-neutral",
-             DERIVED_STATUS_LABEL[t.derived_status] || t.derived_status)
-      : "—"),
+    h("td", {}, pill(ticketStateTone(t.state), t.state || "—"),
+      t.state_drift
+        ? h("span", { class: "drift", title: ticketDriftTitle(t) }, "⚠")
+        : null),
+    // A live claim turns the pill into a jump to that card — a more specific answer to the exact
+    // question this column already asks. No claim, no link: a dead href is worse than plain text.
+    // A live claim turns the summary into a jump to the card running it — the step-by-step detail
+    // this cell deliberately leaves out is exactly what that card holds.
+    h("td", {}, claimant
+      ? h("a", {
+          href: "#assign-" + claimant.id, style: "text-decoration:none; color:inherit;",
+          title: "Xem card đang chạy việc này", onclick: () => jumpToAssignment(claimant.id),
+        }, summary)
+      : summary),
+    h("td", { class: "evidence-cell" }, evidenceCell(t)),
     h("td", {}, t.sprint || "—"),
-    h("td", {}, t.type || "—"),
     h("td", {}, ticketPrChip(t.pr) || "—"),
   ];
   if (opts.showHolder) cells.push(h("td", {}, t.handed_off_to || "—"));
@@ -985,9 +1479,10 @@ function ticketTable(rows, opts) {
   opts = opts || {};
   const headers = [
     h("th", {}, "Vé"), h("th", {}, "Tiêu đề"), h("th", {}, "Trạng thái"),
-    h("th", { title: "Việc này đang chờ ai ra tay — bảng tự suy ra từ PR, escalation và sổ giao việc" },
-      "Chờ ai"),
-    h("th", {}, "Sprint"), h("th", {}, "Loại"), h("th", {}, "PR"),
+    h("th", { title: "Đã tới đâu và đang vướng ai — bấm để mở card đang chạy việc này" },
+      "Tóm tắt"),
+    h("th", { title: "Ảnh/log chứng minh vé đã được verify, bấm để mở" }, "Bằng chứng"),
+    h("th", {}, "Sprint"), h("th", {}, "PR"),
   ];
   if (opts.showHolder) headers.push(h("th", {}, "Đang giữ"));
   return h("div", { class: "table-wrap" },
@@ -1218,6 +1713,9 @@ const SOURCES = [
   { key: "escalations", ref: (db) => db.collection("escalations"), apply: (s) => { view.escalations = docsOf(s); } },
   { key: "tickets", ref: (db) => db.collection("tickets"), apply: (s) => { view.tickets = docsOf(s); } },
   { key: "assignments", ref: (db) => db.collection("assignments"), apply: (s) => { view.assignments = docsOf(s); } },
+  // The page's own writes, read back: an answer stays here until the pump appends it to the
+  // ledger, and that round trip is the only thing a card can show to prove a click landed.
+  { key: "answers", ref: (db) => db.collection(ANSWERS_COLLECTION), apply: (s) => { view.answers = docsOf(s); } },
   {
     key: "meta",
     ref: (db) => db.doc("meta/status"),
@@ -1264,10 +1762,27 @@ async function refresh() {
 }
 
 /* ---------- render ---------- */
+// Backlog leads once nothing needs a person right now — but "Cần quyết định" must never sit
+// below it while something is actually open, so a P0 is never a scroll away. Not knowing yet
+// (still loading, or the listener errored) keeps the old escalations-first order rather than
+// guessing the backlog is safe to promote.
+function escalationsGoFirst(loaded, errored, escalations) {
+  if (!loaded || errored) return true;
+  return escalations.some((e) => !RESOLVED_STATUSES.has(e.status));
+}
+
 function render() { /* draw from `view`; called after every snapshot */
   const board = document.getElementById("board");
-  if (board) board.replaceChildren(
-    renderEscalations(), renderAssignments(), renderTickets());
+  const reportId = reportTicketId();
+  if (board && reportId) {
+    board.replaceChildren(renderReportPage(reportId));
+  } else if (board) {
+    if (escalationsGoFirst(view.loaded.escalations, view.errors.escalations, view.escalations)) {
+      board.replaceChildren(renderEscalations(), renderTickets(), renderAssignments());
+    } else {
+      board.replaceChildren(renderTickets(), renderAssignments(), renderEscalations());
+    }
+  }
   renderSummary();
   renderFreshness();
   renderRefresh();
@@ -1277,6 +1792,9 @@ function render() { /* draw from `view`; called after every snapshot */
 // once connected — while db is unavailable the null-branch below owns #board, and re-running
 // render() here would silently overwrite that panel with the normal empty-state chrome.
 setInterval(() => { if (view.db) render(); }, 30000);
+// Back/forward and a pasted #bao-cao/<id> link both come through here. The route is read at
+// render time, so there is no second copy of "which page am I on" to keep in step.
+window.addEventListener("hashchange", () => { render(); window.scrollTo(0, 0); });
 
 (async () => {
   render();                                   // at rest, before any data

@@ -2,6 +2,7 @@
 """assert-based checks for dashboard.py's transcript rendering. Run: python3 bin/test_dashboard.py"""
 
 import json
+import os
 import subprocess
 import tempfile
 
@@ -96,6 +97,7 @@ def test_shape_ado_ticket_extracts_known_fields():
             "System.Id": 8148,
             "System.State": "New",
             "System.Title": "Confirm agent run/trace tracked fields",
+            "System.WorkItemType": "Bug",
             "System.IterationPath": "AgentIQ\\Sprint 57",
         },
     }
@@ -104,6 +106,7 @@ def test_shape_ado_ticket_extracts_known_fields():
         "title": "Confirm agent run/trace tracked fields",
         "state": "New",
         "sprint": "Sprint 57",
+        "type": "Bug",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/8148",
     }
 
@@ -114,23 +117,168 @@ def test_shape_ado_ticket_handles_missing_fields():
         "title": "",
         "state": "",
         "sprint": "",
+        "type": "",
         "url": "https://dev.azure.com/agentiqai/AgentIQ/_workitems/edit/1",
     }
 
 
-def test_get_ado_backlog_degrades_on_timeout():
+def _backlog_with(mock_run):
     original_run = subprocess.run
     dashboard._CACHE.pop("ado_backlog", None)  # Clear cache so test runs fresh
+    subprocess.run = mock_run
+    try:
+        return get_ado_backlog()
+    finally:
+        subprocess.run = original_run
+
+
+def test_get_ado_backlog_raises_on_timeout_rather_than_reporting_an_empty_backlog():
+    """This asserted `== []` until 2026-09-09, and that was the bug. board_state.py's contract
+    is that only an exception means "the sweep did not run" — a reader that swallows every
+    failure into [] makes that unenforceable, and downstream board_mirror_diff.py turns an empty
+    ticket set into one delete per previously-known ticket. /api/ado-tickets already answers 500
+    on any exception, so the local dashboard shows an error instead of a falsely empty table."""
 
     def mock_run(*args, **kwargs):
         raise subprocess.TimeoutExpired("az", 20)
 
+    try:
+        _backlog_with(mock_run)
+    except subprocess.TimeoutExpired:
+        return
+    raise AssertionError("a timed-out sweep must not be reported as an empty backlog")
+
+
+def test_get_ado_backlog_raises_when_az_exits_non_zero():
+    """The path that leaves no trace at all: `az` exiting non-zero (expired auth, DNS failure)
+    used to `return []` without so much as a stderr line, so a wiped board and a genuinely empty
+    one were indistinguishable in the journal."""
+
+    def mock_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 1, "", "ERROR: Please run 'az login'.")
+
+    try:
+        _backlog_with(mock_run)
+    except RuntimeError as exc:
+        assert "az login" in str(exc), "the reason az failed must survive into the message"
+        return
+    raise AssertionError("a non-zero `az` exit must not be reported as an empty backlog")
+
+
+def test_get_ado_backlog_treats_a_null_result_as_a_successful_empty_sweep():
+    """`az boards query` prints `null`, not `[]`, when the WIQL matches nothing. That is a real
+    sweep that found nothing — it must come back as [] so last_ado_sweep stamps, not raise on
+    iteration and be misreported as a failed read."""
+    assert _backlog_with(lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "null", "")) == []
+
+
+# ---------------------------------------------------------------------------
+# get_ado_attachments — evidence relations, in one batch call rather than one `az` invocation
+# per ticket. `az boards query` never returns relations at all (verified against get_ado_backlog
+# above), so this is the only way to see them.
+# ---------------------------------------------------------------------------
+
+
+def _attachments_with(mock_run, ids):
+    from dashboard import get_ado_attachments
+
+    original_run = subprocess.run
     subprocess.run = mock_run
     try:
-        result = get_ado_backlog()
-        assert result == []
+        return get_ado_attachments(ids)
     finally:
         subprocess.run = original_run
+
+
+def test_get_ado_attachments_makes_no_call_at_all_for_an_empty_id_list():
+    """Nothing to check costs nothing — a pump cycle with no evidence-owing tickets must not
+    spend a single subprocess call here."""
+
+    def mock_run(*args, **kwargs):
+        raise AssertionError("must not shell out when there is nothing to fetch")
+
+    assert _attachments_with(mock_run, []) == {}
+
+
+def test_get_ado_attachments_is_one_call_for_the_whole_batch():
+    calls = []
+
+    def mock_run(cmd, **kwargs):
+        calls.append(cmd)
+        payload = {"value": [{"id": 8172, "relations": []}, {"id": 8325, "relations": []}]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    _attachments_with(mock_run, ["8172", "8325"])
+    assert len(calls) == 1, "must be exactly one call for the whole batch, not one per ticket"
+    assert any("workitemsbatch" in str(part) for part in calls[0]), "no batch endpoint on the call"
+
+
+def test_get_ado_attachments_extracts_name_url_created_date_per_ticket():
+    def mock_run(cmd, **kwargs):
+        payload = {
+            "value": [
+                {
+                    "id": 8172,
+                    "relations": [
+                        {
+                            "rel": "AttachedFile",
+                            "url": "https://dev.azure.com/agentiqai/_apis/wit/attachments/abc",
+                            "attributes": {
+                                "name": "ev-deviation-wording-contrast.png",
+                                "resourceCreatedDate": "2026-08-25T10:00:00Z",
+                            },
+                        },
+                    ],
+                },
+            ]
+        }
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    result = _attachments_with(mock_run, ["8172"])
+    assert result == {
+        "8172": [{
+            "name": "ev-deviation-wording-contrast.png",
+            "url": "https://dev.azure.com/agentiqai/_apis/wit/attachments/abc",
+            "created": "2026-08-25T10:00:00Z",
+        }],
+    }
+
+
+def test_get_ado_attachments_ignores_relations_that_are_not_attached_files():
+    """A work item carries other relation kinds too (parent/child links) — only AttachedFile is
+    evidence."""
+
+    def mock_run(cmd, **kwargs):
+        payload = {"value": [{"id": 1, "relations": [{"rel": "System.LinkTypes.Hierarchy-Forward", "url": "x"}]}]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
+
+    assert _attachments_with(mock_run, ["1"]) == {"1": []}
+
+
+def test_get_ado_attachments_reports_zero_files_for_a_requested_ticket_with_none():
+    """8325 and 8471 — real evidence, zero attachments. Every requested id must come back with an
+    explicit empty list, not be silently absent (silence would look identical to "not checked")."""
+
+    def mock_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"value": []}), "")
+
+    assert _attachments_with(mock_run, ["8325", "8471"]) == {"8325": [], "8471": []}
+
+
+def test_get_ado_attachments_raises_rather_than_reporting_a_false_empty_batch():
+    """Same failure mode get_ado_backlog's own docstring warns about: swallowing this into {}
+    would make every evidence-owing ticket in the batch read as "checked, zero" when the truth is
+    "never checked" — a false OWES alarm on the whole batch."""
+
+    def mock_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, "", "ERROR: Please run 'az login'.")
+
+    try:
+        _attachments_with(mock_run, ["1"])
+    except RuntimeError as exc:
+        assert "az login" in str(exc)
+        return
+    raise AssertionError("a failed batch call must not be reported as zero attachments")
 
 
 def test_iteration_leaves_extracts_name_and_date_range():
@@ -863,10 +1011,15 @@ def test_manager_prefs_fall_back_to_the_defaults_when_the_file_is_unusable(tmp_p
     assert manager_session.read_prefs(str(tmp_path / "missing.json"))["effort"] == manager_session.MANAGER_EFFORT
 
 
-def test_github_pr_query_asks_for_the_review_and_check_state_in_the_same_call():
-    """Review decision and check rollup arrive on the SAME `gh pr list` the board already runs.
-    A second call would double the latency of every sweep and could disagree with the first about
-    which PRs exist — and `gh` returns both fields for free."""
+def test_github_pr_query_keeps_the_heavy_check_field_off_the_500_pr_sweep():
+    """statusCheckRollup resolves per PR, so asking for it across `--state all --limit 500` is
+    what made this call take 42.5s against its own 20s timeout — measured on the repo the pump
+    actually sweeps. Every run then fell back to {} and the board's PR column went empty, while
+    still burning 20s of a 240s budget. Split: the wide sweep drops the field (12.5s, all 500
+    PRs), and a second open-only call fetches it (1.6s, 11 PRs). board_state.ticket_status()
+    reads `checks` ONLY inside `if pr["state"] == "OPEN"`, so nothing is lost by not asking for
+    it anywhere else.
+    """
     original_run = subprocess.run
     dashboard._CACHE.pop("github_prs:/repo", None)
     calls = []
@@ -882,10 +1035,50 @@ def test_github_pr_query_asks_for_the_review_and_check_state_in_the_same_call():
         subprocess.run = original_run
         dashboard._CACHE.pop("github_prs:/repo", None)
 
-    assert len(calls) == 1, "the board must not grow a second gh call"
-    fields = calls[0][calls[0].index("--json") + 1].split(",")
-    for wanted in ("number", "title", "url", "state", "isDraft", "reviewDecision", "statusCheckRollup"):
-        assert wanted in fields, f"gh pr list no longer asks for {wanted}"
+    assert len(calls) == 2, f"expected a wide sweep plus an open-only check call, got {calls}"
+    by_state = {c[c.index("--state") + 1]: c for c in calls}
+    assert set(by_state) == {"all", "open"}, f"unexpected --state values: {list(by_state)}"
+
+    wide = by_state["all"][by_state["all"].index("--json") + 1].split(",")
+    assert "statusCheckRollup" not in wide, (
+        "the 500-PR sweep still asks for statusCheckRollup — this is the 42.5s call"
+    )
+    for wanted in ("number", "title", "url", "state", "isDraft", "reviewDecision"):
+        assert wanted in wide, f"gh pr list no longer asks for {wanted}"
+
+    checks = by_state["open"][by_state["open"].index("--json") + 1].split(",")
+    assert "statusCheckRollup" in checks and "number" in checks, (
+        f"the open-only call must fetch the rollup keyed by number, got {checks}"
+    )
+
+
+def test_github_pr_query_attaches_check_state_to_open_prs_only():
+    # The split must be invisible downstream: prs_by_ticket() still reads statusCheckRollup off
+    # each PR dict, so the open-only result has to be merged back in by PR number.
+    original_run = subprocess.run
+    dashboard._CACHE.pop("github_prs:/repo", None)
+    rollup = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "FAILURE"}]
+
+    def mock_run(cmd, **kwargs):
+        if cmd[cmd.index("--state") + 1] == "open":
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=json.dumps([{"number": 7, "statusCheckRollup": rollup}]), stderr=""
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([
+            {"number": 7, "title": "an open one", "state": "OPEN", "url": "u", "isDraft": False},
+            {"number": 6, "title": "a merged one", "state": "MERGED", "url": "v", "isDraft": False},
+        ]), stderr="")
+
+    subprocess.run = mock_run
+    try:
+        prs = {pr["number"]: pr for pr in dashboard.get_github_prs("/repo")}
+    finally:
+        subprocess.run = original_run
+        dashboard._CACHE.pop("github_prs:/repo", None)
+
+    assert prs[7].get("statusCheckRollup") == rollup
+    # A merged PR's CI is history: ticket_status() never reads it, so it must not be fetched.
+    assert not prs[6].get("statusCheckRollup")
 
 
 def test_github_pr_query_keeps_its_existing_cache_tier():
@@ -902,9 +1095,139 @@ def test_github_pr_query_keeps_its_existing_cache_tier():
     subprocess.run = mock_run
     try:
         dashboard.get_github_prs("/repo")
+        after_first = len(calls)
         dashboard.get_github_prs("/repo")
     finally:
         subprocess.run = original_run
         dashboard._CACHE.pop("github_prs:/repo", None)
 
-    assert len(calls) == 1, "the second call was not served from the cache"
+    # Count the SECOND fetch's subprocesses, not the total: one fetch is now two `gh` calls (a
+    # wide sweep plus an open-only check lookup — see the query test above), and what this pins is
+    # that the cache still absorbs the repeat, whatever a single fetch costs.
+    assert after_first and len(calls) == after_first, (
+        f"the second fetch was not served from the cache: {len(calls) - after_first} extra calls"
+    )
+
+
+def test_unset_identities_announce_the_at_me_fallback(capsys):
+    """@Me is not an error and not empty — it is a real, shorter backlog, which is exactly why it
+    has to say so. Measured on this project: two identities union to 168 tickets, @Me alone
+    returns 21, and nothing downstream can tell those apart."""
+    before = os.environ.pop("PWR_ADO_ASSIGNED_TO", None)
+    try:
+        clause = dashboard._ado_assignee_clause()
+    finally:
+        if before is not None:
+            os.environ["PWR_ADO_ASSIGNED_TO"] = before
+
+    assert "@Me" in clause
+    assert "PWR_ADO_ASSIGNED_TO is unset" in capsys.readouterr().err
+
+
+def test_configured_identities_are_silent_and_union_every_one_of_them(capsys):
+    before = os.environ.get("PWR_ADO_ASSIGNED_TO")
+    os.environ["PWR_ADO_ASSIGNED_TO"] = "a@x.com, b@y.com"
+    try:
+        clause = dashboard._ado_assignee_clause()
+    finally:
+        if before is None:
+            os.environ.pop("PWR_ADO_ASSIGNED_TO", None)
+        else:
+            os.environ["PWR_ADO_ASSIGNED_TO"] = before
+
+    assert "'a@x.com', 'b@y.com'" in clause and "@Me" not in clause
+    assert capsys.readouterr().err == "", "the healthy path must not add a line to every run"
+
+
+# ---------------------------------------------------------------------------
+# The work-item type. ticket_state_drift() keys every one of its rules on it (Bug has
+# Resolved and a QC-verify state, Task has neither) — and shipped inert because the query
+# never asked for the field, so every real ticket reached the rule as type "".
+# ---------------------------------------------------------------------------
+
+
+def test_the_backlog_query_asks_for_the_work_item_type():
+    from dashboard import _ado_backlog_wiql
+
+    assert "[System.WorkItemType]" in _ado_backlog_wiql(), (
+        "without the type every drift rule silently no-ops on real data"
+    )
+
+
+def test_a_shaped_ticket_carries_its_work_item_type_through():
+    from dashboard import _shape_ado_ticket
+
+    shaped = _shape_ado_ticket({"id": 8309, "fields": {
+        "System.Title": "t", "System.State": "Active",
+        "System.WorkItemType": "Bug", "System.IterationPath": "AgentIQ\\Sprint 58"}})
+    assert shaped["type"] == "Bug"
+
+
+def test_a_ticket_whose_type_is_absent_shapes_to_empty_rather_than_missing():
+    """The key must exist either way — ticket_docs() reads it unconditionally."""
+    from dashboard import _shape_ado_ticket
+
+    assert _shape_ado_ticket({"id": 1, "fields": {}})["type"] == ""
+
+
+# ---------------------------------------------------------------------------
+# The batch attachment read. `az rest` cannot reach this org's REST API at all — it has no
+# AAD resource to derive, and forcing the ADO resource id returns "Identity ... has not been
+# materialized". Worse, it does that with EXIT CODE 0 and an HTML body, so a returncode
+# check passes and json.loads() is what finally blows up, several frames from the cause.
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_json_response_is_reported_as_such_rather_than_crashing_in_the_parser():
+    """Exit code 0 plus an HTML sign-in page is the shape this API fails in. A JSONDecodeError
+    several frames away names neither the call nor the cause."""
+    import pytest
+
+    from dashboard import get_ado_attachments
+
+    def mock_run(cmd, **kwargs):
+        class R:
+            returncode = 0
+            stdout = "<!DOCTYPE html><html><title>Identity ... has not been materialized</title>"
+            stderr = ""
+        return R()
+
+    with pytest.raises(RuntimeError, match="(?i)not json|materialized|workitemsbatch"):
+        _attachments_with(mock_run, ["8172"])
+
+
+def test_the_batch_read_authenticates_with_the_pat_not_the_az_session():
+    """The same credential attach_evidence.py already proves works against this org."""
+    from dashboard import get_ado_attachments
+
+    seen = {}
+
+    def mock_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        class R:
+            returncode = 0
+            stdout = '{"value": []}'
+            stderr = ""
+        return R()
+
+    _attachments_with(mock_run, ["8172"])
+    assert seen["cmd"][0] == "curl", "still shelling out to az rest, which cannot reach this org"
+    assert "-u" in seen["cmd"], "no PAT credential on the call"
+
+
+def test_the_pat_never_reaches_the_error_message_when_the_batch_read_fails():
+    """A raised RuntimeError ends up in logs and in the board's error surface."""
+    import pytest
+
+    from dashboard import get_ado_attachments
+
+    def mock_run(cmd, **kwargs):
+        class R:
+            returncode = 22
+            stdout = ""
+            stderr = "curl: (22) failed"
+        return R()
+
+    with pytest.raises(RuntimeError) as exc:
+        _attachments_with(mock_run, ["8172"])
+    assert "FAKEPAT" not in str(exc.value)

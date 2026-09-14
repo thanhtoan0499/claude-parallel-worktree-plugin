@@ -1,0 +1,27 @@
+[Unit]
+Description=Check every 5 minutes that the resident manager session is still up
+
+[Timer]
+# :03, :08, :13 ... :58. Third of the four 5-minute jobs in this directory, each on its own offset
+# (manager-daemon :1, board-mirror :2, stuck-session-watch :4) so they never fire at the same
+# instant and never contend for the `claude` CLI. board-mirror.timer's comment has the reasoning
+# for staying off the round :00/:05/:10 marks in the first place.
+OnCalendar=*-*-* *:3/5:00
+# Polling, not Restart=: the manager is a tmux pane, not a child of this unit, so systemd never
+# sees it die and has nothing to restart. Re-running an idempotent `manager-start` on a schedule
+# is the whole mechanism — it refuses harmlessly when cc-manager is already up, and rebuilds it
+# when it is not.
+#
+# The manager is the only channel a stuck worker has. Waiting up to a full cadence for the first
+# OnCalendar fire after a reboot is five minutes with nowhere to escalate to, so boot gets its own
+# trigger; whichever of the two comes first wins.
+OnBootSec=1min
+# No catch-up burst on wake: either the manager is up (nothing to do) or it is not, and the next
+# fire is at most 5 minutes away and does exactly the same thing.
+Persistent=false
+# A plain (non-templated) `oneshot` service, so systemd can only have one instance active — a fire
+# landing while a start is still going is coalesced into a no-op rather than racing a second
+# `cmew new cc-manager` against the first.
+
+[Install]
+WantedBy=timers.target

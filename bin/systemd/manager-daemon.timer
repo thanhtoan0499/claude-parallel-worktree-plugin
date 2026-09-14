@@ -1,0 +1,21 @@
+[Unit]
+Description=Run one manager escalation pass every 5 minutes
+
+[Timer]
+# :01, :06, :11 ... :56. First of the four 5-minute jobs in this directory, each on its own offset
+# (board-mirror :2, manager-keepalive :3, stuck-session-watch :4) so no two fire at the same
+# instant and contend for the `claude` CLI. board-mirror.timer's comment has the reasoning for
+# staying off the round :00/:05/:10 marks at all.
+OnCalendar=*-*-* *:1/5:00
+# This cadence IS the daemon's tick — the loop that used to live inside manager_daemon.py. An
+# escalation filed by a worker, or an answer the CTO pressed on the board, waits at most one
+# period to be picked up; retune here rather than reintroducing a sleep in the daemon.
+#
+# No catch-up burst on wake: an escalation that was open while the machine slept is still open at
+# the next fire, and a run that skipped changed nothing that needs replaying.
+Persistent=false
+# A plain (non-templated) `oneshot` service, so systemd coalesces a fire that lands on a still
+# running pass into a no-op instead of starting a second one against the same queue file.
+
+[Install]
+WantedBy=timers.target

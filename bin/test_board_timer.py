@@ -151,6 +151,14 @@ def test_run_script_finds_board_mirror_md_when_invoked_through_a_symlink():
 # for writes that never happened (that snapshot is what tells the next real run "already synced").
 
 FAKE_CLAUDE = """#!/usr/bin/env bash
+# board_state.py resolves the CLI through $CLAUDE_BIN as well now (manager_session.claude_bin),
+# so this stand-in serves `claude agents` besides the `-p` refresh. It must answer that like the
+# real CLI and NOT count it: counting would shift FAKE_CLAUDE_FAIL_ON onto a different batch than
+# the test names, and every batch-boundary assertion below would be measuring the wrong run.
+if [[ "${1:-}" == "agents" ]]; then
+  echo '[]'
+  exit 0
+fi
 n=$(( $(cat "$FAKE_CLAUDE_COUNT" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$FAKE_CLAUDE_COUNT"
 if [[ "$n" == "${FAKE_CLAUDE_FAIL_ON:-}" ]]; then
@@ -205,8 +213,14 @@ def _seed_stale_snapshot(env, n):
     into a `delete`, so the run has n+1 entries to send (meta/status last) no matter how much real
     state this machine happens to have — the alternative, leaning on board_state.py's own output,
     makes the batch count depend on whatever sessions and tickets exist when the suite runs.
+
+    `sessions`, not `tickets`: _mirror_env pins HOME to a scratch dir, so `az` has no credentials
+    and the ADO sweep genuinely cannot run here — and diff_writes deliberately withholds ticket
+    deletes when last_ado_sweep is null, so ticket ids would produce zero deletes and these
+    batching assertions would silently prove nothing. Sessions carry no such gate, which is what
+    keeps the count exact regardless of whether the suite's machine can reach ADO at all.
     """
-    stale = {f"tickets/stale-{i}": {"n": i} for i in range(n)}
+    stale = {f"sessions/stale-{i}": {"n": i} for i in range(n)}
     with open(env["BOARD_MIRROR_SNAPSHOT"], "w", encoding="utf-8") as f:
         json.dump(stale, f)
     return set(stale)
@@ -218,9 +232,11 @@ def test_a_failed_batch_records_the_batches_that_landed_and_nothing_after_them()
     # and died identically. Batch 1 lands, batch 2 fails -> exactly batch 1 is recorded, batches
     # 3+ are never sent, and the run still fails loudly.
     with tempfile.TemporaryDirectory() as tmp:
+        # Batch 1 is the meta/pump heartbeat, batch 2 the first delete, so failing on call 3
+        # leaves exactly one deletion landed and everything after it untouched.
         env = _mirror_env(
             tmp, _write_fake_claude(tmp),
-            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="2",
+            BOARD_MIRROR_BATCH_LIMIT="1", FAKE_CLAUDE_FAIL_ON="3",
         )
         stale = _seed_stale_snapshot(env, 4)
 
@@ -249,7 +265,7 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
         )
         stale = _seed_stale_snapshot(env, 4)
 
-        remaining = []
+        remaining, left = [], []
         for _ in range(12):
             proc = _run_mirror(env)
             assert proc.returncode == 0, f"interrupted-but-progressing run failed: {proc.stderr}"
@@ -258,13 +274,18 @@ def test_repeated_interrupted_runs_drain_the_backlog_and_then_go_quiet():
             # that line is the "board is fully current" signal and must keep meaning exactly that.
             assert m or "REFRESH_OK" in proc.stdout, f"run said nothing usable: {proc.stdout!r}"
             remaining.append(int(m.group(1)) if m else 0)
+            # Documents, not batches: the meta/pump heartbeat takes a slot in every first batch,
+            # so the batch count is a coarse proxy that can hold steady across a run that really
+            # did drain something. What must shrink every single run is the backlog itself.
+            left.append(len(stale & _snapshot_keys(env)))
             if remaining[-1] == 0:
                 break
 
         assert len(remaining) > 1, "fixture produced a single batch — this proves nothing"
         assert remaining[-1] == 0, f"backlog never drained: {remaining}"
-        assert remaining == sorted(remaining, reverse=True), f"backlog grew: {remaining}"
-        assert len(set(remaining)) == len(remaining), f"a run made no progress: {remaining}"
+        assert remaining == sorted(remaining, reverse=True), f"batch backlog grew: {remaining}"
+        assert left == sorted(left, reverse=True), f"documents left grew: {left}"
+        assert left[0] > left[-1] == 0, f"the backlog never actually drained: {left}"
 
         final = _snapshot_keys(env)
         assert stale.isdisjoint(final), f"documents left un-deleted after draining: {final}"
@@ -315,6 +336,31 @@ def test_a_second_concurrent_run_refuses_instead_of_racing_the_first():
             f"second run said nothing about the first: {proc.stdout!r} {proc.stderr!r}"
         )
         assert proc.returncode == 0, "stepping aside for a run already in flight is not a failure"
+
+
+def test_a_partial_run_still_lands_the_heartbeat_but_never_the_completeness_stamp():
+    # The regression checkpointing introduced: during a backlog drain every run is PARTIAL, so
+    # meta/status — deliberately last — never lands, and it was the board's only clock. The board
+    # then showed "last updated 2 hours ago" while data was flowing every 5 minutes, and the
+    # staleness alarm (which sizes its threshold off the timer cadence) fired on a healthy pump.
+    # A false alarm that fires routinely is worse than none: people learn to ignore it.
+    with tempfile.TemporaryDirectory() as tmp:
+        env = _mirror_env(
+            tmp, _write_fake_claude(tmp),
+            BOARD_MIRROR_BATCH_LIMIT="1", BOARD_MIRROR_DEADLINE_SEC="0",
+        )
+        _seed_stale_snapshot(env, 4)
+
+        proc = _run_mirror(env)
+
+        assert proc.returncode == 0
+        recorded = _snapshot_keys(env)
+        assert "meta/pump" in recorded, (
+            "a partial run wrote nothing the board can read as proof the pump is alive"
+        )
+        assert "meta/status" not in recorded, (
+            "a partial run claimed the data is complete when it is not"
+        )
 
 
 def test_the_caller_splits_batches_so_the_prompt_never_asks_the_model_to():

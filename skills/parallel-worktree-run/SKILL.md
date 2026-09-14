@@ -91,7 +91,7 @@ to `dispatch`):
 Then dispatch:
 
 ```bash
-parallel-task.sh dispatch <task-name> "<prompt>" [--model <model>] [--effort low|medium|high|xhigh|max]
+parallel-task.sh dispatch <task-name> "<prompt>" [--worktree <path>] [--model <model>] [--effort low|medium|high|xhigh|max]
 ```
 
 This launches an independent, addressable top-level Claude Code session in that worktree

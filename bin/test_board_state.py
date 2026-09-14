@@ -71,6 +71,66 @@ def test_session_docs_mark_an_unregistered_task_as_not_managed():
     assert doc["managed"] is False
 
 
+# ---------------------------------------------------------------------------
+# Rule C — a live session whose name is not in the registry, while a registry entry differing
+# only by a trailing suffix exists. Real evidence: worktrees provisioned as t8309-confirm-tool /
+# t8325-e2e, sessions dispatched as t8309d / t8325b — the board went quiet with no error anywhere.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_mis_dispatched_session_names_both_names():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8309d", registry)
+
+    assert drift is not None
+    assert drift["proposed_state"] is None, "never auto-patch the registry — a wrong guess is worse than an empty card"
+    assert drift["fixable"] is False
+    assert "t8309d" in drift["reason"] and "t8309-confirm-tool" in drift["reason"]
+    assert drift["registry_name"] == "t8309-confirm-tool"
+
+
+def test_todays_real_case_the_second_mis_dispatched_session_too():
+    from board_state import session_registry_drift
+
+    registry = {"t8309-confirm-tool": {}, "t8325-e2e": {}}
+    drift = session_registry_drift("t8325b", registry)
+
+    assert drift is not None and drift["registry_name"] == "t8325-e2e"
+
+
+def test_a_registered_session_is_never_drift():
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("t8309-confirm-tool", {"t8309-confirm-tool": {}}) is None
+
+
+def test_a_genuinely_ad_hoc_session_with_nothing_resembling_it_stays_silent():
+    """An ad-hoc terminal session with no registry entry and nothing similar is normal — flagging
+    it would be indistinguishable from Rule C nagging every spike and smoke test."""
+    from board_state import session_registry_drift
+
+    assert session_registry_drift("someones-quick-spike", {"t8309-confirm-tool": {}}) is None
+
+
+def test_registry_drift_is_distinct_from_managed_false_on_its_own():
+    """Keep strictly distinct from `managed: false` — an unregistered session with nothing
+    resembling it must not carry state_drift even though it is unmanaged."""
+    doc = session_docs([{"name": "someones-quick-spike", "sessionId": "s1", "state": "idle"}],
+                       {"t8309-confirm-tool": {}})["someones-quick-spike"]
+    assert doc["managed"] is False
+    assert doc["state_drift"] is None
+
+
+def test_session_docs_publish_the_registry_drift_for_a_mis_dispatched_session():
+    doc = session_docs([{"name": "t8309d", "sessionId": "s1", "state": "running"}],
+                       {"t8309-confirm-tool": {}})["t8309d"]
+    assert doc["managed"] is False
+    assert doc["state_drift"]["registry_name"] == "t8309-confirm-tool"
+    assert doc["state_drift"]["fixable"] is False
+
+
 def test_session_docs_read_state_from_either_field_name():
     """`claude agents --json` has used both `state` and `status`; the dashboard already reads
     whichever is present and this must not disagree with it."""
@@ -542,7 +602,7 @@ def test_prs_by_ticket_maps_a_single_ab_ref_in_the_title():
     ]
 
     assert prs_by_ticket(prs) == {"5061": {"number": 720, "state": "MERGED", "url": "https://github.com/o/r/pull/720",
-                              "review": None, "checks": None}}
+                              "review": None, "checks": None, "merged_at": None}}
 
 
 def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
@@ -561,7 +621,7 @@ def test_prs_by_ticket_maps_a_title_naming_two_tickets_to_both():
 
     assert set(docs) == {"8196", "8197"}
     assert docs["8196"] == {"number": 100, "state": "OPEN", "url": "https://github.com/o/r/pull/100",
-                           "review": None, "checks": None}
+                           "review": None, "checks": None, "merged_at": None}
     assert docs["8197"] == docs["8196"]
 
 
@@ -783,7 +843,9 @@ def test_build_writes_emits_one_set_per_document_across_all_four_collections():
     assert _writes_for(writes, "sessions")[0]["doc_id"] == "t1"
     assert _writes_for(writes, "escalations")[0]["doc_id"] == "e1"
     assert _writes_for(writes, "tickets")[0]["doc_id"] == "8311"
-    assert _writes_for(writes, "meta")[0]["doc_id"] == "status"
+    # Two meta documents now, at opposite ends: the pump heartbeat leads, the completeness
+    # stamp trails. See test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last.
+    assert [w["doc_id"] for w in _writes_for(writes, "meta")] == ["pump", "status"]
     # Sessions, escalations AND tickets are all non-empty here — unlike the dedicated
     # "meta last" test below (which only populates sessions), this actually discriminates
     # "last overall" from "last among the only populated collection".
@@ -838,6 +900,36 @@ def test_build_writes_truncates_a_doc_id_past_the_200_character_limit():
     assert [len(w["doc_id"]) for w in writes if w["collection"] == "sessions"] == [200]
 
 
+def test_build_writes_puts_the_pump_heartbeat_first_and_meta_status_last():
+    # Two different claims, two different documents, at opposite ends of the run on purpose.
+    # meta/status says "the rows beside me are complete", so it goes last and only a run that
+    # finished ever writes it. meta/pump says "the pump is alive and just ran", which is true the
+    # moment the run starts, so it goes FIRST and therefore lands in batch 1 of every run —
+    # including the partial ones checkpointing made routine. Without it the board's only clock
+    # was meta/status, which now freezes for the whole length of a backlog drain while data is
+    # visibly flowing, and the staleness alarm fires on a perfectly healthy pump.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, assignments=[],
+    )
+
+    assert (writes[0]["collection"], writes[0]["doc_id"]) == ("meta", "pump")
+    assert (writes[-1]["collection"], writes[-1]["doc_id"]) == ("meta", "status")
+    assert writes[0]["data"]["ran_at"] == 1788900000.0
+
+
+def test_the_heartbeat_never_claims_the_data_is_complete():
+    # Everything that says "as of when" stays on meta/status. If the heartbeat carried a sweep
+    # time too, a partial run would stamp it and the board would call incomplete data current —
+    # the exact property meta/status-goes-last exists to protect.
+    writes = build_writes(
+        agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={},
+        now=1788900000.0, ado_swept_at=1788900000.0, assignments=[],
+    )
+
+    assert set(writes[0]["data"]) == {"ran_at"}
+
+
 def test_build_writes_puts_meta_status_last():
     """`meta/status` claims the data alongside it is current. Written first, a batch that dies
     halfway would advertise a sweep whose rows never landed."""
@@ -869,8 +961,7 @@ def test_build_writes_on_empty_sources_still_writes_meta():
     from a sweep that never ran, and only meta/status can say which."""
     writes = build_writes(agents=[], registry={}, escalations=[], tickets=[], pr_by_ticket={}, now=1000.0)
 
-    assert len(writes) == 1
-    assert writes[0]["doc_id"] == "status"
+    assert [w["doc_id"] for w in writes] == ["pump", "status"]
 
 
 # --- Coverage added beyond the brief -----------------------------------------------------
@@ -919,7 +1010,7 @@ def test_build_writes_data_matches_the_underlying_transform_for_each_collection(
     assert _writes_for(writes, "sessions")[0]["data"] == session_docs(agents, registry)["t1"]
     assert _writes_for(writes, "escalations")[0]["data"] == escalation_docs(escalations)["e1"]
     assert _writes_for(writes, "tickets")[0]["data"] == ticket_docs(tickets, pr_by_ticket)["8311"]
-    assert _writes_for(writes, "meta")[0]["data"] == meta_status(
+    assert _writes_for(writes, "meta")[-1]["data"] == meta_status(
         now=1234.0, ado_swept_at=999.0, sessions_scanned_at=1234.0, manager=manager
     )
 
@@ -977,11 +1068,11 @@ def test_build_writes_emits_exactly_one_entry_per_document_with_no_duplicates_or
         now=1000.0,
     )
 
-    assert len(writes) == 7
+    assert len(writes) == 8
     assert len(_writes_for(writes, "sessions")) == 2
     assert len(_writes_for(writes, "escalations")) == 2
     assert len(_writes_for(writes, "tickets")) == 2
-    assert len(_writes_for(writes, "meta")) == 1
+    assert len(_writes_for(writes, "meta")) == 2  # pump heartbeat + completeness stamp
     assert {w["doc_id"] for w in _writes_for(writes, "sessions")} == {"t1", "t2"}
     assert {w["doc_id"] for w in _writes_for(writes, "escalations")} == {"e1", "e2"}
     assert {w["doc_id"] for w in _writes_for(writes, "tickets")} == {"1", "2"}
@@ -1656,7 +1747,14 @@ def test_board_html_uses_no_dom_apis_the_artifact_sandbox_forbids():
     """Every one of these fails silently in the artifact sandbox rather than throwing, so a
     single slip would blank a section with no error anywhere. The page builds DOM through h()."""
     html = _board_html()
-    for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+    # Property ACCESS, not the bare word: the page now carries comments naming innerHTML to
+    # explain why the report ships as data rather than markup, and a substring match would turn
+    # the explanation of the rule into a violation of it. Bracket access is checked too, since
+    # that is the one way to reach the property without a dot.
+    for prop in ("innerHTML", "outerHTML", "insertAdjacentHTML"):
+        for banned in (f".{prop}", f'["{prop}"', f"['{prop}'"):
+            assert banned not in html, f"board.html must not use {prop}"
+    for banned in ("document.write", "eval("):
         assert banned not in html, f"board.html must not use {banned}"
 
 
@@ -2045,7 +2143,7 @@ def test_main_actually_wires_the_real_pr_reader_into_the_collect_call(monkeypatc
     writes = json.loads(capsys.readouterr().out)
     tickets = [w for w in writes if w["collection"] == "tickets"]
     assert tickets[0]["data"]["pr"] == {"number": 1, "state": "OPEN", "url": "pu",
-                                       "review": None, "checks": None}
+                                       "review": None, "checks": None, "merged_at": None}
 
 
 def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
@@ -2076,9 +2174,13 @@ def test_main_reads_the_whole_assignment_ledger_not_only_the_open_ones():
 def test_board_renders_an_assignments_section_in_the_main_render_path():
     script = _board_html_script()
     assert re.search(r"function renderAssignments\(\)", script), "renderAssignments() not found"
-    call = re.search(r"board\.replaceChildren\((.*?)\);", script, re.S)
-    assert call, "render()'s replaceChildren call not found"
-    assert "renderAssignments()" in call.group(1), "assignments section missing from render()"
+    # Scoped to render()'s own body, and every branch of it: the report route added a second
+    # replaceChildren call, and matching only the first one silently stopped checking the board.
+    body = re.search(r"function render\(\) \{.*?\n\}\n", script, re.S)
+    assert body, "render() not found"
+    calls = re.findall(r"board\.replaceChildren\((.*?)\);", body.group(0), re.S)
+    assert calls, "render()'s replaceChildren call not found"
+    assert any("renderAssignments()" in c for c in calls), "assignments section missing from render()"
 
 
 def test_board_subscribes_to_the_assignments_collection():
@@ -3430,6 +3532,333 @@ def test_board_state_and_board_html_agree_on_which_ticket_states_mean_done():
     assert set(re.findall(r'"([^"]+)"', block.group(1))) == set(TICKET_DONE_STATES)
 
 
+# ---------------------------------------------------------------------------
+# state_drift — the board saying `state` and `derived_status` cannot both be true. Real evidence,
+# 2026-09-09: ticket 8471 published `state: New`, `derived_status: waiting_review`, an OPEN PR
+# with green checks. A ticket nobody has started cannot have that PR.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_8471_a_new_task_with_a_pr_waiting_review_proposes_active():
+    """The exact record that prompted this file. A Task has no Resolved state, so the only
+    honest correction is Active."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_review")
+    assert drift is not None
+    assert drift["proposed_state"] == "Active"
+    assert drift["fixable"] is True
+
+
+def test_todays_real_case_5061_a_resolved_bug_is_not_drift():
+    """A false alarm here would be worse than the bug this file exists to catch — 5061 is already
+    correct today."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Resolved", "Bug", "waiting_review") is None
+
+
+def test_a_bug_proposes_resolved_not_active_because_a_bug_has_a_resolved_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Bug", "waiting_merge")
+    assert drift["proposed_state"] == "Resolved"
+
+
+def test_checks_failing_is_also_proof_a_pr_exists():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "checks_failing")
+    assert drift is not None and drift["proposed_state"] == "Active"
+
+
+def test_new_with_no_pr_backed_derived_status_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Task", "unclaimed") is None
+    assert ticket_state_drift("New", "Task", None) is None
+
+
+def test_merged_not_closed_is_reported_but_proposes_nothing():
+    """Merged is not verified — a human has to confirm it, not this file."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "merged_not_closed")
+    assert drift is not None
+    assert drift["proposed_state"] is None
+    assert drift["fixable"] is False
+
+
+def test_unclaimed_while_active_is_not_drift():
+    """Pinned: a person may be working outside this system entirely. Flagging this would nag at
+    honest work."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Active", "Task", "unclaimed") is None
+
+
+def test_a_task_never_proposes_resolved_task_has_no_such_state():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("New", "Task", "waiting_merge")
+    assert drift["proposed_state"] == "Active"
+
+
+def test_unknown_state_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Frobnicated", "Task", "waiting_review") is None
+
+
+def test_unknown_work_item_type_returns_none_rather_than_guessing():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("New", "Epic", "waiting_review") is None
+
+
+def test_state_drift_is_published_beside_state_and_derived_status_never_instead_of_them():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8471", "title": "x", "state": "New", "type": "Task"}],
+        {"8471": _pr(number=726, state="OPEN", review="REVIEW_REQUIRED", checks="passing")},
+    )
+    doc = docs["8471"]
+    assert doc["state"] == "New"
+    assert doc["derived_status"] == "waiting_review"
+    assert doc["state_drift"]["proposed_state"] == "Active"
+    assert doc["state_drift"]["fixable"] is True
+    assert "726" in doc["state_drift"]["reason"] and "New" not in doc["state_drift"]["reason"]
+
+
+def test_state_drift_is_null_when_state_and_derived_status_agree():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "5061", "title": "x", "state": "Resolved", "type": "Bug"}],
+        {"5061": _pr(review="REVIEW_REQUIRED", checks="passing")},
+    )
+    assert docs["5061"]["state_drift"] is None
+
+
+# ---------------------------------------------------------------------------
+# Rule B — a Blocked ticket must say who is blocking and on what. The ledger is the only
+# writable place (ADO tags: `TF401289: The current user does not have permissions to create
+# tags`), so the convention is a non-cancelled assignment naming the ticket whose note carries
+# `CHẶN BỞI:`. Folded into the same state_drift concept: same shape, proposes nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_real_case_a_blocked_ticket_with_no_ledger_note_is_drift():
+    """Three tickets sat Blocked today with the reason recorded nowhere machine-readable — the
+    board was asserting a block it could not explain."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=False)
+    assert drift is not None
+    assert drift["proposed_state"] is None, "the fix is a human writing the reason, not a state moving"
+    assert drift["fixable"] is False
+
+
+def test_a_blocked_ticket_with_a_ledger_note_is_not_drift():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=True) is None
+
+
+def test_blocked_reason_check_is_skipped_when_not_computed():
+    """`has_block_reason=None` means "not checked" — the caller has no ledger data at all — and
+    must never be treated as a positive finding of absence. Callers who never pass it (every
+    pre-existing one) must see the exact same behaviour as before this rule existed."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Blocked", "Task", "unclaimed") is None
+    assert ticket_state_drift("Blocked", "Task", "unclaimed", has_block_reason=None) is None
+
+
+def test_blocked_reason_rule_applies_to_bugs_too():
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Blocked", "Bug", "unclaimed", has_block_reason=False)
+    assert drift is not None and drift["fixable"] is False
+
+
+def test_blocked_reason_refs_collects_tickets_a_live_assignment_explains():
+    from board_state import _blocked_reason_refs, assignment_docs
+
+    docs = assignment_docs(
+        [
+            {"id": "a1", "ts": 1.0, "ado_refs": ["100"], "status": "blocked", "note": "CHẶN BỞI: CTO — chờ duyệt scope"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["200"], "status": "blocked", "note": "đang chờ, chưa rõ vì sao"},
+            {"id": "a3", "ts": 1.0, "ado_refs": ["300"], "status": "cancelled", "note": "CHẶN BỞI: CTO"},
+        ],
+        now=2.0,
+    )
+
+    assert _blocked_reason_refs(docs) == {"100"}
+
+
+def test_ticket_docs_flags_a_blocked_ticket_the_ledger_never_explains():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs=set(),
+    )
+    assert docs["1"]["state_drift"]["fixable"] is False
+    assert docs["1"]["state_drift"]["proposed_state"] is None
+
+
+def test_ticket_docs_leaves_a_blocked_ticket_alone_once_the_ledger_explains_it():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Blocked", "type": "Task"}],
+        {},
+        blocked_reason_refs={"1"},
+    )
+    assert docs["1"]["state_drift"] is None
+
+
+def test_build_writes_wires_the_ledger_note_check_onto_blocked_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "explained", "state": "Blocked", "type": "Task"},
+                 {"id": "2", "title": "unexplained", "state": "Blocked", "type": "Task"}],
+        pr_by_ticket={}, now=1000.0,
+        assignments=[
+            {"id": "a1", "ts": 1.0, "ado_refs": ["1"], "status": "blocked", "note": "CHẶN BỞI: CTO"},
+            {"id": "a2", "ts": 1.0, "ado_refs": ["2"], "status": "blocked", "note": ""},
+        ],
+    )
+    by_id = {w["doc_id"]: w["data"] for w in _writes_for(writes, "tickets")}
+    assert by_id["1"]["state_drift"] is None
+    assert by_id["2"]["state_drift"]["fixable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Evidence (BRIEF-EVIDENCE-2.md) — get_ado_attachments() already exists; this wires it into
+# ticket_docs(), fetched only for tickets that could actually owe evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_owed_states_matches_the_brief():
+    from board_state import EVIDENCE_OWED_STATES
+
+    assert EVIDENCE_OWED_STATES == frozenset(
+        {"Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"}
+    )
+
+
+def test_ticket_docs_publish_evidence_beside_state():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8172", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8172": [
+            {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+        ]},
+    )
+    assert docs["8172"]["evidence"] == [
+        {"name": "shot-8172.html", "url": "https://x/1", "created": "2026-08-20T00:00:00Z"},
+    ]
+
+
+def test_ticket_docs_evidence_defaults_to_an_empty_list():
+    from board_state import ticket_docs
+
+    docs = ticket_docs([{"id": "1", "title": "x", "state": "Active"}], {})
+    assert docs["1"]["evidence"] == []
+
+
+def test_ticket_docs_evidence_is_empty_for_a_ticket_the_batch_never_mentioned():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "8325", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"8325": []},
+    )
+    assert docs["8325"]["evidence"] == []
+
+
+def test_ticket_docs_drops_a_malformed_evidence_entry_rather_than_raising():
+    from board_state import ticket_docs
+
+    docs = ticket_docs(
+        [{"id": "1", "title": "x", "state": "Resolved"}],
+        {},
+        evidence_by_ticket={"1": ["not a dict", {"name": "ok.png", "url": "u", "created": "c"}]},
+    )
+    assert docs["1"]["evidence"] == [{"name": "ok.png", "url": "u", "created": "c"}]
+
+
+def test_prs_by_ticket_carries_the_merge_date_for_evidence_freshness():
+    from board_state import prs_by_ticket
+
+    prs = [{"number": 700, "title": _pr_title("x", "1"), "state": "MERGED", "url": "u",
+            "mergedAt": "2026-08-26T09:00:00Z"}]
+    assert prs_by_ticket(prs)["1"]["merged_at"] == "2026-08-26T09:00:00Z"
+
+
+def test_build_writes_wires_evidence_onto_the_tickets():
+    writes = build_writes(
+        agents=[], registry={}, escalations=[],
+        tickets=[{"id": "1", "title": "x", "state": "Resolved"}],
+        pr_by_ticket={}, now=1000.0,
+        evidence_by_ticket={"1": [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]},
+    )
+    doc = _writes_for(writes, "tickets")[0]["data"]
+    assert doc["evidence"] == [{"name": "shot.png", "url": "u", "created": "2026-01-01T00:00:00Z"}]
+
+
+def test_collect_only_fetches_evidence_for_tickets_that_could_owe_it():
+    """Cost control per the brief: "đừng quét cả backlog" — New/Active/Blocked tickets never
+    even reach the evidence reader."""
+    from board_state import collect
+
+    seen_ids = []
+
+    def read_evidence(ids):
+        seen_ids.extend(ids)
+        return {i: [] for i in ids}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [
+            {"id": "1", "title": "a", "state": "New"},
+            {"id": "2", "title": "b", "state": "Active"},
+            {"id": "3", "title": "c", "state": "Blocked"},
+            {"id": "4", "title": "d", "state": "Resolved"},
+            {"id": "5", "title": "e", "state": "Closed"},
+        ],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert sorted(seen_ids) == ["4", "5"]
+
+
+def test_collect_calls_the_evidence_reader_with_no_ids_when_nothing_could_owe_it():
+    from board_state import collect
+
+    seen_ids = ["sentinel"]
+
+    def read_evidence(ids):
+        seen_ids.clear()
+        seen_ids.extend(ids)
+        return {}
+
+    collect(
+        read_agents=list, read_registry=dict, read_escalations=list,
+        read_tickets=lambda: [{"id": "1", "title": "a", "state": "Active"}],
+        read_prs=dict, now=lambda: 1000.0,
+        read_evidence=read_evidence,
+    )
+    assert seen_ids == []
+
+
 # --- the derived status on the ticket document ---
 
 
@@ -3516,14 +3945,14 @@ def test_an_answered_escalation_stops_blocking_the_ticket():
 def test_board_gives_the_derived_status_its_own_ticket_column():
     script = _board_html_script()
     assert re.search(r"\bt\.derived_status\b", script), "board.html never reads the derived status"
-    assert "DERIVED_STATUS_LABEL" in script, "no Vietnamese gloss for the derived statuses"
+    assert "SUMMARY_BLOCKER" in script, "no Vietnamese gloss for the derived statuses"
 
 
 def test_board_labels_every_derived_status():
     from board_state import TICKET_STATUSES
 
     script = _board_html_script()
-    for name in ("DERIVED_STATUS_LABEL", "DERIVED_STATUS_TONE"):
+    for name in ("SUMMARY_BLOCKER",):
         block = re.search(r"const " + name + r" = \{(.*?)\};", script, re.S)
         assert block, f"board.html has no {name} map"
         for status in TICKET_STATUSES:
@@ -3534,6 +3963,1012 @@ def test_board_keeps_the_ado_state_column_alongside_the_derived_one():
     """Both columns, always. The derived status answers "whose move"; the ADO state is what a
     person put there, and a board that quietly replaces one with the other hides the case where
     they disagree."""
+    script = _board_html_script()
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", script, re.S)
+    assert body, "ticketRow() not found"
+    assert "t.state" in body.group(1), "the ADO state column is gone"
+    summary = re.search(r"function ticketSummary\((.*?)\n\}\n", script, re.S)
+    assert summary, "ticketSummary() not found"
+    assert "t.derived_status" in summary.group(1), "the summary no longer reads the derived status"
+
+
+# ---------------------------------------------------------------------------
+# state_drift on the board (Part 2) — a reader must see it where they already look, in the same
+# warning-icon-plus-tooltip idiom escalationCard() already uses for kind_raw drift.
+# ---------------------------------------------------------------------------
+
+
+def test_ticket_drift_title_names_both_sides():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(
+        prelude
+        + """
+        console.log(ticketDriftTitle({
+          state: "New",
+          state_drift: { proposed_state: "Active", reason: "PR #726 đang chờ review", fixable: true },
+        }));
+        """
+    )
+    assert out == "ADO ghi New nhưng PR #726 đang chờ review", out
+
+
+def test_ticket_drift_title_is_null_with_no_drift():
+    prelude = _js_function("ticketDriftTitle")
+    out = _run_node(prelude + '\nconsole.log(ticketDriftTitle({ state: "Active", state_drift: null }));')
+    assert out == "null", out
+
+
+def test_ticket_row_reuses_the_drift_css_class_for_state_drift():
+    """The same look escalationCard() already uses for kind_raw drift — not a second one invented
+    for this."""
     body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
     assert body, "ticketRow() not found"
-    assert "t.state" in body.group(1) and "t.derived_status" in body.group(1)
+    assert 'class: "drift"' in body.group(1), "ticketRow() does not reuse the .drift idiom"
+    assert "ticketDriftTitle(" in body.group(1), "ticketRow() never calls ticketDriftTitle()"
+    assert "state_drift" in body.group(1)
+
+
+def test_session_tile_reuses_the_drift_css_class_for_a_mis_dispatched_session():
+    """Rule C, same look as Rule A/B on the ticket row — one wording style across the board."""
+    body = re.search(r"function sessionTile\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "sessionTile() not found"
+    assert 'class: "drift"' in body.group(1), "sessionTile() does not reuse the .drift idiom"
+    assert "s.state_drift" in body.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The assignment card — "Việc đã giao".
+#
+# Three rules, two of them the CTO's own words:
+#   - priority is the manager's business, not his ("tôi ko quan tâm P1 hay quan trọng mức thấp gì
+#     hết ... tôi tin tưởng bạn"), so it must not open the card — but it must stay in the data and
+#     keep deciding the order, because dropping a label is a UI change, not a schema change;
+#   - the plan must answer "where is this work right now". A row per step was already tried and
+#     rejected: "mở ra 1 nùi thông tin bên trong đọc ko hiểu gì";
+#   - and nothing may be left to be inferred from a missing row — the same rule renderAssignments
+#     already follows when the sessions listener has not loaded.
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_card_does_not_open_with_a_priority_pill():
+    """The pill was the first thing the eye landed on and the least useful thing on the card.
+    No P-word label anywhere in it."""
+    src = _assignment_card_source()
+    assert "SEVERITY_LABEL" not in src, "the card still renders the priority label"
+    assert "SEVERITY_TONE" not in src, "the card still renders the priority pill's tone"
+
+
+def test_priority_survives_the_pill_being_dropped():
+    """board_state still publishes it, the localhost dashboard still reads it, and the board still
+    sorts by it. Deleting the pill must not delete the field underneath."""
+    from board_state import assignment_docs
+
+    docs = assignment_docs([{"id": "a1", "title": "x", "priority": "P0", "ts": 1.0}], 2.0)
+    assert docs["a1"]["priority"] == "P0", "board_state stopped publishing priority"
+    assert re.search(r"SEVERITY_RANK\[a\.priority\]", _board_html_script()), (
+        "the board stopped ordering assignments by priority"
+    )
+
+
+def test_assignment_card_buckets_its_steps_instead_of_one_row_per_step():
+    """The finished steps collapse to a count — nobody needs to re-read what is already behind
+    them — and only what is running and what is left stay spelled out."""
+    src = _assignment_card_source()
+    assert "STEP_STATE_LABEL[st]" not in src, "the card still prints a state label per step"
+    for label in ('"đã xong"', '"đang làm"', '"còn lại"'):
+        assert label in src, f"the step list has no {label} bucket"
+
+
+def test_assignment_card_says_out_loud_when_no_step_is_running():
+    """A missing "đang làm" row would read as "nothing is running" by inference, and an inference
+    is exactly what this board refuses to make a reader do."""
+    assert "chưa có bước nào đang chạy" in _assignment_card_source()
+
+
+def test_assignment_card_still_names_an_unrecognised_step_state():
+    """STEP_STATE_LABEL exists because an unlabelled state renders as nothing at all, and nothing
+    at all reads as "not started". Bucketing must not quietly fold "unknown" into "còn lại"."""
+    src = _assignment_card_source()
+    assert '"không rõ"' in src, "an unrecognised step state has no bucket of its own"
+
+
+def test_step_detail_moves_to_hover_rather_than_onto_the_row():
+    """owner / eta / depends_on are secondary, and the CTO offered hover for exactly this ("khi mà
+    expose ra ko collapse hoặc hover vô"). title= needs no JS and cannot move the layout."""
+    src = _assignment_card_source()
+    assert "depends_on" in src, "dependencies vanished from the card entirely"
+    assert re.search(r"title:\s*stepDetail\(", src), "step detail is not offered on hover"
+
+
+def test_the_collapsed_step_count_answers_where_the_work_is_on_hover():
+    """"1/4 bước" on its own says nothing. Collapsed is where the board is actually read, so the
+    answer the opened card gives hangs off that count too rather than costing a click."""
+    src = _assignment_card_source()
+    assert re.search(r"title:\s*stepHint", src), "the collapsed step count carries no hover hint"
+    assert '"đang làm: "' in src, "the hover hint never names the step that is running"
+
+
+def test_assignment_summary_keeps_the_ticket_chip():
+    """The one thing the CTO said he actually wants on this card. It was already correct — dropping
+    the pill in front of it must not take it along."""
+    assert '"AB#"' in _card_part("summary"), "the ADO ticket chip left the summary line"
+
+
+def test_assignment_card_reads_title_before_status_before_duration_before_token_before_ticket_before_steps_before_estimate():
+    """The CTO read the card back to us in this order: "tên task đang làm, light tip status, chạy
+    bao lâu rồi, token nếu có, ticket relevant, qua những step nào rồi... còn những step nào?
+    estimate?". The summary line's DOM order must match, not just contain the same facts."""
+    summary = _card_part("summary")
+    markers = ["a-title", "ASSIGNMENT_STATUS_TONE", '"chạy"', '"token"', "ticketUrl", '"bước"', '"xong"']
+    positions = [summary.index(m) for m in markers]
+    assert positions == sorted(positions), f"reading order is wrong: {list(zip(markers, positions))}"
+
+
+def test_assignment_card_hides_an_unmeasured_token_row_instead_of_repeating_chua_ro():
+    """"token chưa rõ" on every single card is noise, not information — the CTO's own complaint
+    about anything that repeats the same non-answer on every tile."""
+    summary = _card_part("summary")
+    assert re.search(r"spend\s*!=\s*null\s*\?", summary), (
+        "the token row must be conditional on a measured spend, not always rendered"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section order — Backlog leads unless something is actually open ("Cần quyết định").
+# ---------------------------------------------------------------------------
+
+
+def _js_const(name, src=None):
+    src = _board_html_script() if src is None else src
+    m = re.search(r"const " + name + r"\s*=\s*(.*?;)", src, re.S)
+    assert m, f"const {name} not found in board.html"
+    return "const " + name + " = " + m.group(1)
+
+
+def _run_node(snippet):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover - node is present in this repo's dev env
+        pytest.skip("node is not installed")
+    out = subprocess.run([node, "-e", snippet], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip()
+
+
+def test_escalations_go_first_only_while_something_is_actually_open():
+    src = _board_html_script()
+    prelude = "\n".join([_js_const("RESOLVED_STATUSES", src), _js_function("escalationsGoFirst", src)])
+    cases = """
+    console.log(JSON.stringify([
+      escalationsGoFirst(true, false, []),
+      escalationsGoFirst(true, false, [{status: "open"}]),
+      escalationsGoFirst(true, false, [{status: "answered"}, {status: "dismissed"}]),
+      escalationsGoFirst(false, false, []),
+      escalationsGoFirst(true, true, []),
+    ]));
+    """
+    out = _run_node(prelude + "\n" + cases)
+    assert out == "[false,true,false,true,true]", out
+
+
+def test_render_promotes_the_backlog_when_nothing_is_open_but_keeps_escalations_first_otherwise():
+    """Textual check on render() itself — the pure decision function above is exercised in node,
+    this proves render() actually branches on it rather than always drawing one fixed order."""
+    script = _board_html_script()
+    body = re.search(r"function render\(\)\s*\{(.*?)\n\}\n", script, re.S)
+    assert body, "render() not found"
+    assert "escalationsGoFirst(" in body.group(1), "render() never consults the ordering decision"
+    assert re.search(r"renderTickets\(\),\s*renderAssignments\(\),\s*renderEscalations\(\)", body.group(1)), (
+        "no branch puts Backlog ahead of both other sections"
+    )
+    assert re.search(r"renderEscalations\(\),\s*renderTickets\(\),\s*renderAssignments\(\)", body.group(1)), (
+        "no branch keeps escalations first when something is open"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backlog row -> the assignment card working it ("Chờ ai" links down, "Đang làm gì" is new).
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_for_ticket_matches_on_ado_refs_and_is_pure():
+    prelude = _js_function("assignmentForTicket")
+    out = _run_node(
+        prelude
+        + """
+        const assignments = [
+          { id: "a1", ado_refs: ["100", "200"] },
+          { id: "a2", ado_refs: ["300"] },
+        ];
+        console.log(JSON.stringify([
+          (assignmentForTicket("200", assignments) || {}).id || null,
+          (assignmentForTicket("999", assignments) || {}).id || null,
+        ]));
+        """
+    )
+    assert out == '["a1",null]', out
+
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# evidenceDrift() — BRIEF-EVIDENCE-2.md Part 2. Pure, JS-only (its inputs — t.evidence, t.pr,
+# t.state — are all already on the published ticket doc, so there is nothing here a server-side
+# computation would add). "missing" and "stale" must read as different problems: this is exactly
+# how AB#6541 escaped QC for 14 days — screenshots dated before the fix does not prove the fix.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_prelude():
+    script = _board_html_script()
+    return _js_const("EVIDENCE_OWED_STATES", script) + "\n" + _js_function("evidenceDrift", script)
+
+
+def test_new_active_and_blocked_owe_nothing_regardless_of_evidence():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "New" }, [], null),
+          evidenceDrift({ state: "Active" }, [], null),
+          evidenceDrift({ state: "Blocked" }, [], null),
+        ]));
+        """
+    )
+    assert out == "[null,null,null]", out
+
+
+def test_zero_attachments_in_an_owed_state_is_missing():
+    for state in ("Resolved", "Ready for QC verify on Stag", "QC Testing on Stag", "Closed"):
+        out = _run_node(_evidence_prelude() + f'console.log(evidenceDrift({{state: "{state}"}}, [], null));')
+        assert out == "missing", state
+
+
+def test_having_any_evidence_with_no_pr_to_compare_against_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift({ state: "Resolved" },
+          [{ name: "x.png", url: "u", created: "2026-08-20T00:00:00Z" }], null));
+        """
+    )
+    assert out == "null", out
+
+
+def test_todays_real_case_6541_evidence_older_than_the_merge_is_stale():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "verify-goal-verbfirst.png", url: "u", created: "2026-08-25T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "stale", out
+
+
+def test_evidence_newer_than_the_merge_is_not_drift():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "after-fix.png", url: "u", created: "2026-08-27T09:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_the_newest_attachment_is_what_gets_compared_against_the_merge_date():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(evidenceDrift(
+          { state: "Resolved" },
+          [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" },
+           { name: "new.png", url: "u", created: "2026-08-27T00:00:00Z" }],
+          { mergedAt: "2026-08-26T09:00:00Z" }));
+        """
+    )
+    assert out == "null", out
+
+
+def test_missing_and_stale_are_told_apart():
+    out = _run_node(
+        _evidence_prelude()
+        + """
+        console.log(JSON.stringify([
+          evidenceDrift({ state: "Resolved" }, [], { mergedAt: "2026-08-26T09:00:00Z" }),
+          evidenceDrift({ state: "Resolved" },
+            [{ name: "x.png", url: "u", created: "2026-08-01T00:00:00Z" }],
+            { mergedAt: "2026-08-26T09:00:00Z" }),
+        ]));
+        """
+    )
+    assert out == '["missing","stale"]', out
+
+
+def test_ticket_row_links_the_waiting_cell_to_the_claiming_assignments_card():
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "assignmentForTicket(" in src, "ticketRow never looks up who claimed the ticket"
+    assert re.search(r'href:\s*"#assign-"\s*\+\s*claimant\.id', src), (
+        "the claimed-ticket link must anchor to the assignment card's stable id"
+    )
+    assert "jumpToAssignment(" in src, "the link never opens/highlights the target card"
+    assert re.search(r"claimant\s*\?", src), "an unclaimed ticket must fall back to plain text, not a dead link"
+
+
+
+def test_assignment_card_has_a_stable_anchor_id():
+    card = _assignment_card_source()
+    assert re.search(r'id:\s*a\.id\s*!=\s*null\s*\?\s*"assign-"\s*\+\s*a\.id', card), (
+        "the card has no stable id an outside link can jump to"
+    )
+
+
+def test_jump_to_assignment_opens_the_closed_details_and_flashes_the_card():
+    src = _board_html_script()
+    fn = re.search(r"function jumpToAssignment\((.*?)\n\}", src, re.S)
+    assert fn, "jumpToAssignment() not found"
+    assert "details.open = true" in fn.group(1) or ".open = true" in fn.group(1), (
+        "jumping to a card must open its closed <details>"
+    )
+    assert "classList.add" in fn.group(1), "jumping to a card must flash it so the eye finds it"
+
+
+# ---------------------------------------------------------------------------
+# "Việc đã giao" as a grid of square tiles, not a full-width stack.
+# ---------------------------------------------------------------------------
+
+
+def _board_html_style():
+    import pathlib
+
+    html = (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+    blocks = re.findall(r"<style[^>]*>(.*?)</style>", html, re.S)
+    assert blocks, "board.html has no <style> block"
+    return "\n".join(blocks)
+
+
+def test_assignment_grid_uses_css_grid_not_a_full_width_stack():
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "display: grid" in rule.group(1)
+    assert "auto-fill" in rule.group(1), "the grid must collapse to fewer columns on a narrow board"
+
+
+def test_assignment_grid_does_not_stretch_every_tile_to_the_tallest_open_card():
+    """A card that auto-opens (needsAttention) is taller than its closed neighbours — grid's
+    default stretch would force every tile in that row to match it."""
+    style = _board_html_style()
+    rule = re.search(r"\.assignment-grid\s*\{(.*?)\}", style, re.S)
+    assert rule, "no .assignment-grid rule in board.html's <style>"
+    assert "align-items: start" in rule.group(1), (
+        "grid tiles must size to their own content (align-items: start), not stretch to match the row"
+    )
+
+
+def test_render_assignments_draws_open_cards_through_the_grid_container():
+    body = re.search(r"function renderAssignments\(\)\s*\{(.*?)\n\}\n", _board_html_script(), re.S)
+    assert body, "renderAssignments() not found"
+    assert '"assignment-grid"' in body.group(1), "the open assignment cards are not drawn in the grid container"
+# ---------- the board's write path (bin/systemd/board_mirror_answers.py is the other half) ----------
+
+
+def _answers_collection():
+    """The one collection name the page writes and the pump's return path reads. Imported rather
+    than typed twice here: a rename on either side would otherwise leave the two halves pointing
+    at different collections, with a click that lands in storage nobody ever reads."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "systemd"))
+    from board_mirror_answers import ANSWERS_COLLECTION
+
+    return ANSWERS_COLLECTION
+
+
+def test_board_writes_a_chosen_option_to_the_collection_the_return_path_reads():
+    script = _board_html_script()
+    assert re.search(
+        r'const ANSWERS_COLLECTION\s*=\s*"' + re.escape(_answers_collection()) + r'"', script
+    ), "board.html does not write to the collection board_mirror_answers.py reads back"
+    assert re.search(
+        r'view\.db\.doc\(ANSWERS_COLLECTION \+ "/" \+ esc\.id\)\.set\(', script
+    ), "the page has no write path — an option click records nothing"
+
+
+def test_board_never_writes_into_the_collections_the_pump_owns():
+    """`escalations` is board_state.py's write set: the next mirror run replays it, so anything
+    the page put there is overwritten — or deleted once the doc leaves board_state.py's output."""
+    script = _board_html_script()
+    for owned in ("escalations", "sessions", "tickets", "assignments", "meta"):
+        # Reading these is the whole point of the page (SOURCES does exactly that) — only a write
+        # verb chained onto one is the failure.
+        assert not re.search(
+            r'\.doc\("' + owned + r'/[^)]*\)\.(set|update|delete)\(', script
+        ), f"the page writes into the pump's own {owned}"
+    # Every document ref the page builds off the live db handle, so a second write anywhere fails
+    # this rather than quietly aiming at a collection the pump replays over.
+    refs = re.findall(r"view\.db\.doc\(([^)]*)\)", script)
+    assert refs == ['ANSWERS_COLLECTION + "/" + esc.id'], f"unexpected db document writes: {refs}"
+
+
+def test_board_only_offers_an_answer_control_on_a_record_still_waiting_for_a_human():
+    """The same gate board_mirror_answers.accepted_answers() applies. Offering a button any wider
+    than that gate is a control that looks live and is silently discarded on the way down —
+    `open` records are still the daemon's to decide, and one already carrying an answer may
+    already have been acted on."""
+    body = re.search(r"function answerControls\(([^)]*)\)\s*\{(.*?)\n\}", _board_html_script(), re.S)
+    assert body, "answerControls() not found"
+    guard = re.search(r"const answerable =([^;]*);", body.group(2))
+    assert guard, "answerControls() has no single answerable guard"
+    for required in ('esc.status === "needs_human"', "esc.answer == null", "options.length"):
+        assert required in guard.group(1), f"the answer gate does not check {required}"
+
+
+# ---------------------------------------------------------------------------
+# One "Tóm tắt" cell replaces "Chờ ai" + "Đang làm gì": how far it got, and what
+# stands in the way — with the step-by-step detail left to the assignment card below.
+# ---------------------------------------------------------------------------
+
+
+def _summary_prelude():
+    script = _board_html_script()
+    parts = [
+        _js_const("STEP_STATE_LABEL", script),
+        _js_const("SUMMARY_BLOCKER", script),
+        _js_const("EVIDENCE_OWED_STATES", script),
+    ]
+    parts += [_js_function(name, script) for name in
+              ("assignmentForTicket", "stepState", "planSteps", "evidenceDrift", "ticketSummary")]
+    return "\n".join(parts)
+
+
+def test_ticket_summary_pairs_step_progress_with_who_the_ticket_is_waiting_on():
+    """The two halves a manager actually reads: how far, and who holds it now."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "running",
+          plan: [{step: "sửa", state: "done"}, {step: "test", state: "done"},
+                 {step: "PR", state: "doing"}] }];
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "waiting_review",
+            pr: { number: 732, state: "OPEN" } }, assignments));
+        """
+    )
+    assert out == "xong 2/3 bước · chờ TL duyệt PR #732", out
+
+
+def test_ticket_summary_lets_a_recorded_block_reason_speak_for_the_whole_cell():
+    """A block already names who and on what — appending a derived phrase would only dilute it."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "blocked",
+          note: "CHẶN BỞI: Minh — chờ trả lời FR-25",
+          plan: [{step: "sửa", state: "done"}] }];
+        console.log(ticketSummary({ id: "100", state: "Blocked" }, assignments));
+        """
+    )
+    assert out == "CHẶN BỞI: Minh — chờ trả lời FR-25", out
+
+
+def test_ticket_summary_names_qc_once_the_code_is_merged_but_the_ticket_is_not_closed():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED" } }, []));
+        """
+    )
+    assert out == "code đã merge · chờ QC xác nhận", out
+
+
+def test_ticket_summary_shouts_when_the_next_move_belongs_to_the_person_reading_the_board():
+    """An escalation is the one status whose whole point is that it is waiting on the reader."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Blocked", derived_status: "waiting_decision" }, []));
+        """
+    )
+    assert out == "CẦN ANH QUYẾT", out
+
+
+def test_ticket_summary_says_nobody_has_it_rather_than_leaving_the_cell_empty():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary({ id: "100", state: "New", derived_status: "unclaimed" }, []));
+        """
+    )
+    assert out == "chưa giao việc", out
+
+
+def test_ticket_summary_of_a_finished_ticket_claims_nothing_is_left_to_chase():
+    """derived_status null is a real answer — printing a chase phrase there invites wasted work.
+    Evidence is fresh here on purpose: a Closed ticket is exactly one EVIDENCE_OWED_STATES covers,
+    so this fixture must actually be verified or the next test's CHƯA VERIFY would be meaningless."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Closed", derived_status: null,
+            pr: { number: 700, state: "MERGED", mergedAt: "2026-08-01T00:00:00Z" },
+            evidence: [{ name: "shot.png", url: "u", created: "2026-08-02T00:00:00Z" }] }, []));
+        """
+    )
+    assert out == "xong", out
+
+
+# ---------------------------------------------------------------------------
+# ticketSummary()'s third clause (BRIEF-EVIDENCE-2.md Part 4) — reads evidenceDrift() directly,
+# never recomputes it, so this line and the "Bằng chứng" column can never disagree.
+# ---------------------------------------------------------------------------
+
+
+def test_todays_brief_example_a_verified_missing_ticket_gets_chua_verify():
+    """The brief's own worked example, verbatim: "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY"."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        const assignments = [{ id: "a1", ado_refs: ["100"], status: "running",
+          plan: [{step:"a",state:"done"},{step:"b",state:"done"},{step:"c",state:"done"}] }];
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" }, evidence: [] },
+          assignments));
+        """
+    )
+    assert out == "xong 3/3 bước · chờ QC xác nhận · CHƯA VERIFY", out
+
+
+def test_ticket_summary_flags_stale_evidence_the_same_way_as_missing():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "old.png", url: "u", created: "2026-08-01T00:00:00Z" }] }, []));
+        """
+    )
+    assert out.endswith(" · CHƯA VERIFY"), out
+
+
+def test_ticket_summary_adds_nothing_when_the_ticket_does_not_owe_evidence():
+    """Not owed means not owed — no suffix, not even an empty one, for a ticket still in flight."""
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Active", derived_status: "waiting_review",
+            pr: { number: 732, state: "OPEN" } }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+
+
+def test_ticket_summary_adds_nothing_once_evidence_is_fresh():
+    out = _run_node(
+        _summary_prelude()
+        + """
+        console.log(ticketSummary(
+          { id: "100", state: "Resolved", derived_status: "merged_not_closed",
+            pr: { number: 719, state: "MERGED", mergedAt: "2026-08-26T09:00:00Z" },
+            evidence: [{ name: "after.png", url: "u", created: "2026-08-27T00:00:00Z" }] }, []));
+        """
+    )
+    assert "CHƯA VERIFY" not in out
+    assert out == "code đã merge · chờ QC xác nhận", out
+
+
+def test_ticket_table_no_longer_carries_the_split_columns_it_replaced():
+    """Source check: the merge is only real if the two old headers are gone from the table."""
+    script = _board_html_script()
+    body = re.search(r"function ticketTable\(.*?\n\}\n", script, re.S)
+    assert body, "ticketTable() not found"
+    assert '"Chờ ai"' not in body.group(0), "the 'Chờ ai' column survived the merge"
+    assert '"Đang làm gì"' not in body.group(0), "the 'Đang làm gì' column survived the merge"
+    assert '"Tóm tắt"' in body.group(0), "no 'Tóm tắt' column replaced them"
+    assert '"Loại"' not in body.group(0), "the 'Loại' column is still there"
+
+
+# ---------------------------------------------------------------------------
+# Rule D + E, both the CTO's own words on 2026-09-10:
+#   "Nếu là bug vd như 8309 thì sau khi merged status sang Ready for QC verify on Stag
+#    thì phải assignee cho QC là minh nguyen thanh"
+#   "mấy cái PR đang open mà chờ review thì ticket blocking là chờ approve PR kiểu v
+#    thì tôi mới biết chứ"
+# ---------------------------------------------------------------------------
+
+
+def test_a_merged_bug_is_handed_to_qc_rather_than_left_for_someone_to_notice():
+    """Merged is not verified — but who verifies it is not an open question, so the hand-off is
+    the write and the verification stays the human's."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Bug", "merged_not_closed")
+    assert drift["proposed_state"] == "Ready for QC verify on Stag"
+    assert drift["assign_to"] == "QC"
+    assert drift["fixable"] is True
+
+
+def test_a_merged_task_still_proposes_nothing_because_closing_one_is_a_human_call():
+    """Task has no QC-verify state to move to, and Closed is never written from here."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "merged_not_closed")
+    assert drift["proposed_state"] is None
+    assert drift["fixable"] is False
+
+
+def test_an_active_task_whose_pr_is_waiting_on_review_says_so_instead_of_claiming_work():
+    """Active asserts someone is touching it now. Nobody is — the PR is sitting in a queue, and
+    that is the one fact the reader wants off the row without opening anything."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Task", "waiting_review")
+    assert drift["proposed_state"] == "Blocked"
+    assert drift["reason"] == "chờ approve PR"
+    assert drift["fixable"] is True
+
+
+def test_an_active_bug_waiting_on_review_goes_to_resolved_not_blocked():
+    """Bug HAS a word for dev-done-awaiting-verification. Using Blocked there would throw away
+    the more precise state the type already offers."""
+    from board_state import ticket_state_drift
+
+    drift = ticket_state_drift("Active", "Bug", "waiting_review")
+    assert drift["proposed_state"] == "Resolved"
+    assert drift["fixable"] is True
+
+
+def test_a_bug_already_resolved_while_its_pr_waits_is_not_drift():
+    """Resolved + open PR is the correct pair — reporting it would train the reader to ignore
+    the column."""
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Resolved", "Bug", "waiting_review") is None
+
+
+def test_a_bug_already_in_the_qc_queue_is_not_re_proposed_on_every_pump_cycle():
+    from board_state import ticket_state_drift
+
+    assert ticket_state_drift("Ready for QC verify on Stag", "Bug", "merged_not_closed") is None
+
+
+def test_the_published_drift_keeps_the_hand_off_the_rule_decided():
+    """_state_drift_doc() rebuilds the rule's dict to fold in a PR number. Anything it forgets to
+    copy is silently dropped on the way to ado_state_sync — which is how a QC hand-off becomes a
+    state change with nobody's name on it."""
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("Active", "Bug", "merged_not_closed", None, {"number": 719})
+    assert doc["proposed_state"] == "Ready for QC verify on Stag"
+    assert doc["assign_to"] == "QC"
+    assert doc["reason"] == "PR #719 đã merged"
+
+
+def test_a_review_block_names_the_pr_the_reader_has_to_open():
+    """"chờ approve PR" without a number sends the reader hunting for which one."""
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("Active", "Task", "waiting_review", None, {"number": 729})
+    assert doc["reason"] == "chờ approve PR #729"
+
+
+def test_a_state_only_drift_publishes_no_hand_off_rather_than_an_empty_one():
+    from board_state import _state_drift_doc
+
+    doc = _state_drift_doc("New", "Task", "waiting_review", None, {"number": 733})
+    assert doc["assign_to"] is None
+# The "Bằng chứng" column (BRIEF-EVIDENCE-2.md Part 3) — after Tóm tắt, before PR.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_cell_source():
+    script = _board_html_script()
+    body = re.search(r"^function evidenceCell\(.*?\n\}", script, re.S | re.M)
+    assert body, "evidenceCell() not found in board.html"
+    return body.group(0)
+
+
+def test_evidence_cell_reads_dash_for_a_ticket_that_owes_nothing():
+    """No green tick anywhere in this function — that would be noise on every not-yet-done row."""
+    src = _evidence_cell_source()
+    assert '"—"' in src
+    assert "✓" not in src and "✔" not in src, "a green tick on every done row is noise"
+
+
+def test_evidence_cell_shows_a_red_chip_for_missing_evidence():
+    src = _evidence_cell_source()
+    assert "pill-bad" in src
+    assert "chưa có bằng chứng" in src
+
+
+def test_evidence_cell_shows_a_yellow_chip_for_stale_evidence():
+    src = _evidence_cell_source()
+    assert "pill-warn" in src
+    assert "bằng chứng cũ hơn bản sửa" in src
+
+
+def test_evidence_cell_reads_evidence_drift_rather_than_recomputing_it():
+    """Part 4's own rule applies here too: one derivation, read everywhere."""
+    src = _evidence_cell_source()
+    assert "evidenceDrift(" in src
+
+
+
+
+def test_the_evidence_column_shows_the_report_and_nothing_else():
+    """The file list this replaced could say "9 tệp" and never say whether any of them proved
+    anything. One way in, or an honest statement that there is nothing to open."""
+    src = _evidence_cell_source()
+    assert "REPORT_ROUTE" in src, "the cell never links to the report"
+    assert "chưa có báo cáo" in src, "a ticket with files but no report reads as if it had evidence"
+    assert ".chip" not in src and "tệp nữa" not in src, "the old file list is still being built"
+
+
+def test_the_report_opens_on_its_own_page_not_inside_the_cell():
+    """A verification report is something you sit and read. Collapsed into one cell of a twenty-row
+    table it is unreadable, which is what this route replaced — and a hash means the back button
+    works and the URL can be pasted to someone."""
+    src = _board_html_text()
+    assert 'const REPORT_ROUTE = "#bao-cao/"' in src
+    assert "collapsedGroup(" not in _evidence_cell_source(), "the report is still collapsed in the cell"
+    assert re.search(r"function renderReportPage\(", src), "there is no report page to open"
+    assert 'addEventListener("hashchange"' in src, "back/forward would not re-render"
+
+
+def test_the_report_page_says_so_when_there_is_nothing_to_show():
+    """A pasted link to a ticket whose report has not synced yet must not render a blank panel."""
+    fn = re.search(r"function renderReportPage\(.*?\n\}\n", _board_html_text(), re.S)
+    assert fn, "renderReportPage() not found"
+    assert "Chưa có báo cáo" in fn.group(0)
+    assert "report-back" in fn.group(0), "no way back to the board"
+
+
+def test_the_report_is_built_through_h_not_innerhtml():
+    """Assigning innerHTML is inert in the artifact sandbox — the report would be a blank cell
+    with no error anywhere — and markup that came off an ADO attachment has no business being
+    injected into a published page. Both reasons say: build it, do not paste it."""
+    src = _board_html_text()
+    fn = re.search(r"function reportNode\(.*?\n\}\n", src, re.S)
+    assert fn, "reportNode() not found"
+    assert "innerHTML" not in fn.group(0)
+    assert 'h("table"' in fn.group(0), "the results table is not built through h()"
+
+
+def test_report_screenshots_are_served_by_the_artifact_itself():
+    """The sandbox blocks images from off-allowlist hosts, and a cross-site ADO request would not
+    carry the session cookie either — a remote src renders an empty box with no error."""
+    src = _board_html_text()
+    fn = re.search(r"function reportEvidence\(.*?\n\}\n", src, re.S)
+    assert fn, "reportEvidence() not found"
+    assert "e.src" in fn.group(0), "the screenshot never comes from the artifact's asset store"
+    assert "dev.azure.com" not in fn.group(0)
+
+
+def test_the_board_and_the_html_file_share_one_report_stylesheet():
+    """Two renderers are forced (see above); two LOOKS are not. board.html carries
+    evidence_report.CSS verbatim between its markers, so a style fixed in one place is fixed in
+    both. Re-sync with:
+
+        python3 -c "import sys;sys.path.insert(0,'bin');import evidence_report as e;\
+print(e.CSS.strip())"
+
+    and paste the output between the markers in board.html.
+    """
+    from evidence_report import CSS
+
+    src = _board_html_text()
+    block = re.search(r"generated from evidence_report\.CSS[^\n]*\n(.*?)\n\s*/\* == end report css",
+                      src, re.S)
+    assert block, "the report css markers are missing from board.html"
+    assert block.group(1).strip() == CSS.strip(), (
+        "board.html's report css has drifted from evidence_report.CSS — see this test's docstring"
+    )
+
+
+def _png(path):
+    """A real 1x1 PNG — the html renderer opens it to inline a thumbnail, so a fake header is not
+    enough here."""
+    import base64
+
+    path.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+
+
+def test_both_renderers_emit_the_same_report_markup(tmp_path):
+    """A shared stylesheet only helps while both renderers reach for the same tags and classes.
+    This is the tripwire for one of them quietly growing its own."""
+    import evidence_report
+
+    manifest = {
+        "ticket": 1, "type": "bug", "title": "t",
+        "requirement": {"source": "AC-1", "text": "phải thế này"},
+        "changed": ["a.py — đổi gì đó"],
+        "results": [{"req": "r", "verdict": "đạt", "note": "ghi chú",
+                     "evidence": [{"file": "log.txt", "proves": "chứng minh gì đó"},
+                                  {"file": "shot.png", "proves": "màn hình sau khi sửa"}]}],
+        "red_green": {"how": "gỡ ra", "red": "FAILED", "green": "PASSED"},
+        "blockers": ["còn vướng"],
+        "checklist": dict.fromkeys(evidence_report.CHECKLIST_KEYS, True),
+    }
+    (tmp_path / "log.txt").write_text("x", encoding="utf-8")
+    _png(tmp_path / "shot.png")
+    html = evidence_report.render(manifest, tmp_path)
+
+    js = re.search(r"function reportNode\(.*?\n\}\n", _board_html_text(), re.S).group(0)
+    js += re.search(r"function reportEvidence\(.*?\n\}\n", _board_html_text(), re.S).group(0)
+
+    for cls in ("sub", "meta", "req", "ev", "what", "cols", "lbl", "code", "why", "plain"):
+        assert f'class="{cls}' in html or f'class="{cls}"' in html, f"html renderer dropped .{cls}"
+        assert f'"{cls}' in js, f"board renderer dropped .{cls}"
+    for tag in ("h1", "h2", "blockquote", "figure", "figcaption", "pre", "table", "thead", "tbody"):
+        assert f"<{tag}" in html, f"html renderer dropped <{tag}>"
+        assert f'"{tag}"' in js, f"board renderer dropped <{tag}>"
+
+
+def test_every_report_verdict_word_has_a_tone():
+    """A verdict the map does not know renders untoned, which reads as neutral — the one thing a
+    failing verdict must never look like."""
+    from evidence_report import VERDICTS
+
+    tone = re.search(r"const REPORT_TONE = \{(.*?)\};", _board_html_text(), re.S)
+    assert tone, "REPORT_TONE not found"
+    for verdict in VERDICTS:
+        assert '"' + verdict + '"' in tone.group(1), "no tone for " + repr(verdict)
+
+
+def test_evidence_column_sits_after_summary_and_before_pr():
+    script = _board_html_script()
+    body = re.search(r"function ticketRow\((.*?)\n\}\n", script, re.S)
+    assert body, "ticketRow() not found"
+    src = body.group(1)
+    assert "evidenceCell(" in src, "ticketRow() never renders the evidence cell"
+    summary_at = src.index("ticketSummary(")
+    evidence_at = src.index("evidenceCell(")
+    pr_at = src.index("ticketPrChip(")
+    assert summary_at < evidence_at < pr_at, "the evidence column is not between Tóm tắt and PR"
+
+    header = re.search(r"function ticketTable\(.*?\n\}\n", script, re.S).group(0)
+    assert '"Bằng chứng"' in header
+    assert header.index('"Tóm tắt"') < header.index('"Bằng chứng"') < header.index('"PR"')
+
+
+
+# ---------------------------------------------------------------------------
+# The evidence cell as a list, not a scroller. Shipped as a 220px horizontal-overflow
+# strip: one long attachment name filled the whole cell and hid every sibling behind a
+# scrollbar the reader has to notice, aim at, and drag — per row.
+# ---------------------------------------------------------------------------
+
+
+def _board_html_text():
+    """The whole file, not just its <script> — these assertions are about the stylesheet."""
+    import pathlib
+
+    return (pathlib.Path(__file__).parent / "board.html").read_text(encoding="utf-8")
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Previewing evidence, not downloading it. The raw `AttachedFile` relation url ADO stores
+# carries no filename, and that endpoint answers `application/octet-stream` +
+# `content-disposition: attachment` — every click saves a file. Adding a fileName whose
+# extension ADO recognises flips it to `image/png` with no disposition header, so the
+# browser renders it in the tab. Verified against a live attachment on 2026-09-10.
+# ---------------------------------------------------------------------------
+
+
+def _evidence_href_prelude():
+    script = _board_html_script()
+    # evidenceHref() delegates the scheme check to safeHref() — the same guard every other href
+    # sink on this page uses — so the prelude needs both.
+    return _js_function("safeHref", script) + "\n" + _js_function("evidenceHref", script)
+
+
+def test_an_evidence_link_carries_the_filename_that_makes_ado_serve_it_inline():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref(
+          "https://dev.azure.com/o/p/_apis/wit/attachments/abc", "shot.png"));
+        """
+    )
+    assert "fileName=shot.png" in out
+    assert "download=false" in out
+    assert out.startswith("https://dev.azure.com/o/p/_apis/wit/attachments/abc?")
+
+
+def test_an_url_that_already_has_a_query_gets_the_parameters_appended_not_a_second_question_mark():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref("https://x/att/1?api-version=7.1", "a.png"));
+        """
+    )
+    assert out.count("?") == 1, out
+    assert "&fileName=a.png" in out
+
+
+def test_a_filename_with_spaces_or_unicode_is_escaped_into_the_query():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(evidenceHref("https://x/att/1", "bằng chứng cuối.png"));
+        """
+    )
+    assert " " not in out, "a raw space in the query breaks the link"
+    assert "%" in out
+
+
+def test_a_non_http_url_yields_no_link_at_all_rather_than_a_broken_one():
+    out = _run_node(
+        _evidence_href_prelude()
+        + """
+        console.log(JSON.stringify(evidenceHref("javascript:alert(1)", "x.png")));
+        """
+    )
+    assert out == "null", out
+
+
+
+
+# ---------------------------------------------------------------------------
+# cmew renames a session for display; the registry does not follow it.
+# ---------------------------------------------------------------------------
+
+
+def test_a_cmew_renamed_session_still_joins_its_registry_row():
+    """Dispatch "t8419-slug", `claude agents --json` reports "T8419-slug 🔹". An exact-match join
+    misses, and the board draws a card with no branch, no worktree and managed:false — which reads
+    as somebody's own terminal rather than as work the manager dispatched."""
+    registry = {"t8419-slug": {"branch": "feature/t8419-slug", "path": "/wt/t8419-slug"}}
+    docs = session_docs([{"name": "T8419-slug 🔹", "sessionId": "s1", "state": "running"}], registry)
+
+    assert "t8419-slug" in docs, "the doc is filed under the display name nothing else can reach"
+    doc = docs["t8419-slug"]
+    assert doc["branch"] == "feature/t8419-slug"
+    assert doc["worktree"] == "/wt/t8419-slug"
+    assert doc["managed"] is True
+
+
+def test_an_ultracode_session_joins_too():
+    """effort=ultracode adds a 🔥 in front as well as the 🔹 behind."""
+    docs = session_docs([{"name": "🔥 T5061 🔹", "sessionId": "s1"}], {"t5061": {"branch": "b"}})
+    assert docs["t5061"]["branch"] == "b"
+
+
+def test_an_exact_name_is_never_folded_into_another_registry_row():
+    """Exact match wins, so two tasks that differ only by case stay two tasks."""
+    registry = {"Build": {"branch": "upper"}, "build": {"branch": "lower"}}
+    docs = session_docs([{"name": "build", "sessionId": "s1"}], registry)
+    assert docs["build"]["branch"] == "lower"
+
+
+def test_an_unregistered_session_keeps_its_own_name():
+    """Somebody's own terminal is not work we dispatched, and must not be renamed into one."""
+    docs = session_docs([{"name": "phien-cua-ai-do", "sessionId": "s1"}], {"t5061": {}})
+    assert "phien-cua-ai-do" in docs
+    assert docs["phien-cua-ai-do"]["managed"] is False
