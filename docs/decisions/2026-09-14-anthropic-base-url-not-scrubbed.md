@@ -36,8 +36,14 @@ carrying a `cc/` prefix that only that proxy resolves). Under those conditions t
 conclusion is wrong in both directions: a worker inheriting `api.anthropic.com` from the tmux server
 asks the public API for a model only the proxy has, and every model reports "may not exist".
 
-Spawned workers that day ended up with **no** `ANTHROPIC_*` variables at all and returned 401
-regardless — the reason was not established, and it is a separate open problem from this decision.
+Spawned workers that day returned 401 regardless of how the variables were arranged. The cause
+turned out to have nothing to do with this decision: an existing session, asked directly, reported
+`You've hit your weekly limit · resets 6am (UTC)`. The account quota was exhausted, and every
+spawned session failed for that reason alone.
+
+The lesson is the cheaper diagnostic: **ask a live session what it sees before theorising about the
+environment.** Two wrong hypotheses were chased — a base-URL mismatch and a missing token — because
+nobody read the actual error text first.
 
 Before trusting either conclusion, re-measure: read `/proc/<worker-pid>/environ` for the live panes
 and compare against the parent. Do not carry a stale environment fact forward.
