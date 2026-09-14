@@ -184,6 +184,14 @@ scrub_inherited_claude_env() {
   # environment still carries that session's markers, and every session spawned afterwards
   # inherits them: CLAUDE_CODE_SESSION_ID makes a worker claim the DISPATCHER's session id, and
   # CLAUDE_CODE_CHILD_SESSION stops its transcript being saved at all. Scrub them at the source.
+  #
+  # Do NOT scrub ANTHROPIC_BASE_URL. Measured 2026-09-11 across all 14 live panes: the 12 healthy
+  # workers all carry ANTHROPIC_BASE_URL=https://api.anthropic.com, and the only two sessions that
+  # 401 are the two where it is unset. These sessions authenticate with the Claude Max OAuth login
+  # in ~/.claude/.credentials.json, which is only valid against the public API. Unset the variable
+  # and settings.json supplies its own pair instead — the proxy URL plus a token these sessions do
+  # not use — so every turn dies with "API key required for remote API access". settings.json
+  # describes the DESKTOP session's auth path, not a spawned session's; they are not interchangeable.
   local v
   for v in CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION CLAUDE_PID CLAUDE_CODE_EXECPATH; do
     tmux set-environment -g -u "$v" 2>/dev/null || true
