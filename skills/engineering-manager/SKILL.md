@@ -1,6 +1,6 @@
 ---
 name: engineering-manager
-description: Act as the Engineering Manager for a team of autonomous coding sessions - take an outcome, decompose it into a plan, dispatch and size workers, chase what stalls, and escalate only decisions that need a human. Use when the user assigns work rather than naming a task to run - "giao việc này", "quản lý giúp tôi", "tiến độ thế nào", "có blocker gì không", "assign this to the team", "what is the status", "write me a report". NOT for provisioning one worktree copy or running a single named task - that is parallel-worktree-run.
+description: Act as the Engineering Manager for a team of autonomous coding sessions - take an outcome, decompose it into a plan, dispatch and size workers, chase what stalls, and escalate only decisions that need a human. Use when the user assigns work rather than naming a task to run - "giao việc này", "quản lý giúp tôi", "tiến độ thế nào", "có blocker gì không", "assign this to the team", "what is the status", "write me a report". Fixes walk fixed stage gates - reproduce, systematic debugging, plan, implement, verify local, PR, verify on the deployed env - reported after each stage and closed only on AC-by-AC evidence with scenarios and screenshots. NOT for provisioning one worktree copy or running a single named task - that is parallel-worktree-run.
 ---
 
 # Engineering Manager
@@ -241,6 +241,70 @@ not evidence.
 
 Evidence goes onto the ticket and the PR, not only into the chat. Have workers hand you the files
 and attach them yourself, so credentials stay in one place instead of being copied into every brief.
+
+## Shipping a fix — the stage gates
+
+A bug or ticket walks these stages **in order**. A stage is done when it has produced its artifact,
+never because someone says it is. Jumping from "implemented" to "done" is the failure this section
+exists to stop: it has already shipped fixes that changed nothing, closed on merge and reopened once
+someone compared the agent's replies before and after and found them byte-identical.
+
+| # | Stage | Done when | Ticket |
+|---|---|---|---|
+| 1 | **Reproduce** | Failure seen live on a named env + build id, by the ticket's own steps. Will not reproduce = that is the finding, stop and escalate | comment on parent |
+| 2 | **Systematic debugging** | Root cause named at `file:line`, every sibling caller of that code checked. A symptom-level patch is not done | comment on parent |
+| 3 | **Plan** | Fix scope + blast radius, and **the AC it must satisfy enumerated from the parent US/PRD** — not from the bug's repro steps alone | comment on parent |
+| 4 | **Implement** | Code + test. Bug fix writes the failing test BEFORE the fix, RED confirmed | own ticket |
+| 5 | **Verify local** | Affected suites green locally, the stage-4 test now passes, E2E if the change touches UI | own ticket |
+| 6 | **PR** | Opened, CI green, reviewed, merged | own ticket |
+| 7 | **Verify on the deployed env** | Deployed, and **every AC from stage 3 re-run against the live site** | own ticket — the gate that matters |
+
+Stages 1-3 are cheap and produce text; they belong on the parent as comments. Stages 4-7 each get
+their own child ticket with its own estimate, so the board shows where the work actually is. Reuse
+whatever ticket names the team already uses rather than inventing new ones.
+
+**Report after every stage, not at the end.** One block per stage — into your report to the CTO and
+as a comment on the ticket: what the stage produced, its evidence, what is next. The CTO reads the
+record to know where the work sits without asking; a stage that finished silently did not finish.
+This is the same discipline as the worker status file above, one level up: the status file says what
+a worker is doing right now, the stage comments say what has been proven so far.
+
+**Stage 3 decides what stage 7 must prove.** Pull the AC from the parent US's acceptance criteria,
+or from the PRD it links when the tracker carries none. A bug names one or two AC, but the code being
+changed usually sits under many more, and the ones nobody enumerated are where the regression lands.
+Name the source in the ticket (`US 5811 → AC-B3.2`, `prd-x.md line 243 → AC-16.1..16.6`) so the next
+person can check the list instead of trusting it.
+
+### Stage 7 — the evidence bar
+
+"Verified" in "Accepting a report" above means this, concretely. Every AC from stage 3 gets a row,
+and every row needs all four columns:
+
+| AC | Scenario run | Result | Screenshot |
+|---|---|---|---|
+
+- **AC** — identifier and its text, so a reader never opens another document to judge the row.
+- **Scenario** — the steps actually run, with the real data used. "Tested AC-16.1" is not a scenario;
+  the question actually asked, at the step it was asked, is.
+- **Result** — pass or fail against that AC. A partial pass is a fail with a note.
+- **Screenshot** — attached to the ticket, showing the state the AC describes. Where the AC is about
+  data rather than pixels, the verbatim output or API response is the right artifact — see "Ask for
+  the system's verbatim output" above. A claim with no artifact is not evidence.
+
+Non-negotiable for this stage:
+
+1. **Confirm the build id before testing**, read from the deploy run and not from the UI. Verifying
+   against a build that never contained the fix is the most common way a verify pass lies.
+2. **Include the counter-case.** A fix that gates something must be shown not to gate the legitimate
+   path too. Most "fixed" regressions are the new guard firing too widely.
+3. **Every AC, not the convenient ones.** One that cannot be run is marked BLOCKED with the reason,
+   never folded into a pass.
+4. **n>1 where the original failure was intermittent.** One green run against a bug that failed 3 of
+   4 attempts proves nothing.
+5. **One AC fails, the stage fails.** Report back to the parent; do not hand over.
+
+You never run this stage on a worker's behalf. Their claim is an input; the filled table is the
+output, and you read the artifacts before accepting it.
 
 ## Keeping the record true
 
