@@ -68,15 +68,21 @@ docker_slot_busy() {
   [[ -n "$(docker compose -f "$REPO_ROOT/deploy/docker-compose.yml" -p "aiquinta-mfg-s${n}" ps -q 2>/dev/null)" ]]
 }
 
+# Slot N's frontend port (5173+N*100) must be a registered WorkOS redirect
+# URI — there's no local auth bypass, so an unregistered slot's login just
+# fails. Cap allocation to the slots actually registered; extend this list
+# (and register the new port in the WorkOS dashboard) to allow more.
+DOCKER_SLOTS_ALLOWED="${DOCKER_SLOTS_ALLOWED:-1 2 3 4}"
+
 next_free_docker_slot() {
   local used
   used="$(reg_get '[.[] | select(.mode=="docker") | .num] | map(tostring) | join(" ")')"
-  for n in 1 2 3 4 5 6 7 8 9; do
+  for n in $DOCKER_SLOTS_ALLOWED; do
     [[ " $used " == *" $n "* ]] && continue
     docker_slot_busy "$n" && continue
     echo "$n"; return 0
   done
-  echo "error: no free docker slot (1-9 all taken)" >&2
+  echo "error: no free docker slot in allow-list ($DOCKER_SLOTS_ALLOWED) — each slot's port must be a registered WorkOS redirect URI. Stop an idle task (parallel-task.sh stop <task>), or register more ports and set DOCKER_SLOTS_ALLOWED to extend." >&2
   return 1
 }
 
