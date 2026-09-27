@@ -69,6 +69,20 @@ Port scheme, so the user knows what to expect:
 - `native` mode: task *N* → gateway `8500+N`, frontend `5500+N` (a different, smaller offset;
   shared Postgres/Azurite across all native tasks)
 
+**`docker` mode is capped by `DOCKER_SLOTS_ALLOWED`** (default `1 2 3 4`, set once per repo to
+match whichever frontend ports are actually registered as WorkOS redirect URIs — a slot outside
+that list can run, but nobody can log into it). If `start` fails with `no free docker slot in
+allow-list`, that is NOT a signal to raise `DOCKER_SLOTS_ALLOWED` yourself — a slot you invent
+isn't a registered redirect URI either, so the copy comes up unloginable and the person only
+finds out later. Stop and ask instead: run `parallel-task.sh list`, show the user which
+tasks/slots are `stopped` (idle, safe to free) vs `running` (still in use), and let them choose
+one of:
+1. Free a slot — `parallel-task.sh rm <stopped-task>` (or `stop` if they want to keep the
+   worktree) — then retry `start` on the freed slot number.
+2. Register one more port in the WorkOS dashboard and only then extend
+   `DOCKER_SLOTS_ALLOWED` for that session.
+3. Use `native` mode instead for this task (different port range, not part of this cap).
+
 ## Step 3 — dispatch the implementing subagent
 
 Spawn a **background** `Agent` call (default subagent type is fine — don't pass
@@ -140,6 +154,28 @@ whether to keep that copy running (for review / follow-up) or tear it down with 
   `curl http://localhost:<fe-port>/runtime-config.js` shows `gatewayUrl` matching *this* slot's
   gateway port, and `docker compose -p aiquinta-mfg-s<N> ps` lists all five services (postgres,
   azurite, redis, gateway, frontend) — not just frontend.
+- **`start` failed on `no free docker slot`, and you were tempted to just extend
+  `DOCKER_SLOTS_ALLOWED` to get unblocked**: don't. That was a real incident — a slot outside
+  the allow-list still starts, but its frontend port has no matching WorkOS redirect URI, so the
+  user can't log in and won't find out until they try. Treat the error as a stop-and-ask, per
+  Step 2 above, not an obstacle to route around.
+- **Cleaning up a task whose worktree directory is already gone (but `list`/registry still shows
+  it)**: `parallel-task.sh rm` shells out to `git worktree remove`, which fails with "is not a
+  working tree" when the directory was already deleted outside the tool. Confirm with
+  `git worktree list` (if git itself has no record either, nothing is lost) then delete the
+  stale entry directly: `jq 'del(."<task-name>")' .claude/worktrees/.parallel-registry.json`
+  (write to a temp file and `mv` it back — don't edit the registry in place mid-read).
+- **Moving a running copy to a different slot without losing its work**: `parallel-task.sh stop
+  <task>` (downs the old slot's containers) → `cd` into that task's worktree and run
+  `dev-stack.sh <new-slot> up -d` directly → update its registry entry's `num` and `ports` to
+  match the new slot. This keeps the worktree's commits; re-running `start` under the same
+  task-name would instead try to create a brand-new worktree/branch and collide.
+- **`parallel-task.sh` / `dev-stack.sh` reported "command not found" even though `which
+  parallel-task.sh` found it earlier**: the Bash tool's shell state (including `PATH`) does not
+  persist between calls the way `pwd` does — each call can start from a plain, non-interactive
+  shell. Export the plugin's `bin/` directory onto `PATH` explicitly in any command that calls
+  these scripts (`export PATH="<plugin-repo>/bin:$PATH"`), don't assume a prior successful call
+  proves it's on `PATH` for the next one.
 
 ## Quick reference
 
