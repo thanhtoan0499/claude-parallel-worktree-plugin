@@ -17,12 +17,16 @@
 #
 # Usage:
 #   dev-native.sh infra <up|down|status>
-#   dev-native.sh <task> <up|down|status|logs [gateway|frontend]|migrate>
+#   dev-native.sh <task> <up|down|status|logs [gateway|frontend]|migrate|purge>
 #
 #   task | gateway | frontend | postgres db
 #   -----+---------+----------+------------------
 #    1   |  8501   |  5501    |  aiquinta_native_t1
 #    2   |  8502   |  5502    |  aiquinta_native_t2
+#
+# `down` only stops the processes (data kept, for a fast resume). `purge` also
+# stops them, then drops this task's DB and removes its WORKSPACE_ROOT — use it
+# when the task is actually being torn down (parallel-task.sh rm), not paused.
 #
 # Shared infra ports (fixed, distinct from both the classic `deploy` stack
 # and dev-stack.sh's slots so all three can coexist): postgres 5599, azurite
@@ -223,6 +227,24 @@ down() {
   echo ">> task ${TASK} stopped" >&2
 }
 
+purge() {
+  down
+  # WORKSPACE_ROOT is always /tmp/workspaces-native-t<task> (built above from a
+  # validated integer TASK) — the guard below still confirms containment
+  # before rm -rf, per filesystem-safety.md.
+  local ws_root
+  ws_root="$(realpath -m "$WORKSPACE_ROOT")"
+  if [[ "$ws_root" == "/tmp/workspaces-native-t"* ]]; then
+    rm -rf "$ws_root"
+  else
+    echo "warn: refusing to rm unexpected WORKSPACE_ROOT '$ws_root'" >&2
+  fi
+  rm -f "$GATEWAY_LOG" "$FRONTEND_LOG"
+  echo ">> task ${TASK} purged: workspace + logs removed." >&2
+  echo "   DB '${DB_NAME}' was left in place — this session's permissions block dropdb;" >&2
+  echo "   drop it yourself if you want it gone (shared infra postgres, port ${INFRA_PG_PORT})." >&2
+}
+
 status() {
   # Checks the actual port, not a launch-time PID — see the comment in
   # down() for why a captured PID goes stale (uvicorn --reload's worker
@@ -252,6 +274,7 @@ logs() {
 case "$COMMAND" in
   up) up ;;
   down) down ;;
+  purge) purge ;;
   status) status ;;
   migrate) migrate ;;
   logs) logs "${1:-gateway}" ;;

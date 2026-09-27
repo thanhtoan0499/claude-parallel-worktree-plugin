@@ -235,10 +235,23 @@ cmd_rm() {
   local task="$1" force=false
   [[ "${2:-}" == "--force" ]] && force=true
   [[ "$(reg_get --arg k "$task" 'has($k)')" == "true" ]] || { echo "error: unknown task '$task'" >&2; exit 1; }
-  local path
+  local path mode num
   path="$(reg_get --arg k "$task" '.[$k].path')"
+  mode="$(reg_get --arg k "$task" '.[$k].mode')"
+  num="$(reg_get --arg k "$task" '.[$k].num')"
 
-  cmd_stop "$task" || true
+  # rm is a final teardown, not a pause — unlike `stop`, also purge this
+  # slot/task's data (volumes + locally-built images for docker; native's
+  # scratch workspace) so removing N copies doesn't leave N sets of orphaned
+  # DB/blob data behind forever. Runs even if the worktree dir is already
+  # gone (path may not exist) — dev-stack.sh/dev-native.sh only need REPO_ROOT.
+  if [[ -d "$path" ]]; then
+    if [[ "$mode" == "docker" ]]; then
+      ( cd "$path" && dev-stack.sh "$num" down -v --rmi local ) || true
+    else
+      ( cd "$path" && dev-native.sh "$num" purge ) || true
+    fi
+  fi
 
   if $force; then
     git -C "$REPO_ROOT" worktree remove --force "$path"

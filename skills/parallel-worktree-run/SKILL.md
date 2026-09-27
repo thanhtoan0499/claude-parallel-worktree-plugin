@@ -124,10 +124,22 @@ time.
 
 ```bash
 parallel-task.sh list              # every copy: branch, mode, ports, live status
-parallel-task.sh stop  <task-name> # stop the dev stack, keep worktree + branch
-parallel-task.sh rm    <task-name> # stop + remove the worktree (branch kept)
+parallel-task.sh stop  <task-name> # stop the dev stack, keep worktree + branch + DATA
+parallel-task.sh rm    <task-name> # PURGE (volumes/images/native workspace) + remove worktree (branch kept)
 parallel-task.sh rm    <task-name> --force  # also discard uncommitted changes
 ```
+
+`stop` vs `rm` — different cleanup depth, on purpose:
+- `stop` only downs the dev stack (`docker compose down`, no `-v`/`--rmi`, or killing the
+  native processes) — DB/blob data survives so resuming the same task is fast.
+- `rm` is a final teardown: it also purges that slot/task's data before removing the
+  worktree — `docker` mode gets `dev-stack.sh <N> down -v --rmi local` (drops the slot's
+  named volumes AND its locally-built `aiquinta-mfg-s<N>-*` images — those are NOT shared
+  across slots, so leaving them is pure disk waste); `native` mode gets
+  `dev-native.sh <N> purge` (removes `/tmp/workspaces-native-t<N>` + logs). Exception: the
+  native per-task Postgres DB (`aiquinta_native_t<N>`) is left in place — dropping it needs
+  `dropdb` inside the shared infra container, which this plugin's own dev session had denied
+  by permission rule; `purge` prints a reminder instead of silently skipping it.
 
 `rm` never deletes the branch — after the PR merges, clean up with
 `git branch -d feature/<task-name>` same as `worktree-new-feature`'s convention.
@@ -170,6 +182,12 @@ whether to keep that copy running (for review / follow-up) or tear it down with 
   `dev-stack.sh <new-slot> up -d` directly → update its registry entry's `num` and `ports` to
   match the new slot. This keeps the worktree's commits; re-running `start` under the same
   task-name would instead try to create a brand-new worktree/branch and collide.
+- **Docker volumes/images from an old slot are still sitting around** (`docker volume ls` /
+  `docker images` show `aiquinta-mfg-s<N>_*` / `aiquinta-mfg-s<N>-*` for a slot nothing in
+  `list` uses anymore): this happens when a slot was abandoned WITHOUT going through
+  `parallel-task.sh rm` (e.g. the registry entry was hand-edited via `jq` during a move, per
+  the bullet above) — `rm`'s purge step never ran for that slot. Clean up directly:
+  `docker compose -f deploy/docker-compose.yml -p aiquinta-mfg-s<N> down -v --rmi local`.
 - **`parallel-task.sh` / `dev-stack.sh` reported "command not found" even though `which
   parallel-task.sh` found it earlier**: the Bash tool's shell state (including `PATH`) does not
   persist between calls the way `pwd` does — each call can start from a plain, non-interactive
